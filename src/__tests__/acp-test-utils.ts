@@ -346,6 +346,7 @@ export function createTestModel(overrides?: Partial<Model>): Model {
         inputModalities: ["text", "image"],
         supportsPersonality: false,
         additionalSpeedTiers: [],
+        serviceTiers: [],
         isDefault: true,
         ...overrides,
     };
@@ -367,6 +368,7 @@ export function mockPromptTurn(fixture: CodexMockTestFixture, sessionId: string)
         turn: {
             id: "turn-id",
             items: [],
+            itemsView: "full",
             status: "inProgress",
             error: null,
             startedAt: null,
@@ -379,6 +381,7 @@ export function mockPromptTurn(fixture: CodexMockTestFixture, sessionId: string)
         turn: {
             id: "turn-id",
             items: [],
+            itemsView: "full",
             status: "completed",
             error: null,
             startedAt: null,
@@ -398,7 +401,7 @@ export async function setupPromptAndSendNotifications(
 ): Promise<void> {
     const codexAcpAgent = fixture.getCodexAcpAgent();
     const codexAppServerClient = fixture.getCodexAppServerClient();
-    const turn = { id: "turn-id", items: [], status: "inProgress" as const, error: null };
+    const turn = { id: "turn-id", items: [], itemsView: "full" as const, status: "inProgress" as const, error: null };
 
     codexAppServerClient.turnStart = vi.fn().mockResolvedValue({
         turn,

@@ -240,6 +240,7 @@ describe('ACP server test', { timeout: 40_000 }, () => {
                 inputModalities: ["text"],
                 supportsPersonality: false,
                 additionalSpeedTiers: [],
+                serviceTiers: [],
                 isDefault: true
             }],
             nextCursor: null
@@ -360,11 +361,11 @@ describe('ACP server test', { timeout: 40_000 }, () => {
 
         const listSkillsSpy = vi.spyOn(codexAppServerClient, "listSkills").mockResolvedValue({ data: [] });
         const turnStartSpy = vi.spyOn(codexAppServerClient, "turnStart").mockResolvedValue({
-            turn: { id: "turn-id", items: [], status: "inProgress", error: null }
+            turn: { id: "turn-id", items: [], itemsView: "full", status: "inProgress", error: null }
         } as any);
         vi.spyOn(codexAppServerClient, "awaitTurnCompleted").mockResolvedValue({
             threadId: "session-id",
-            turn: { id: "turn-id", items: [], status: "completed", error: null }
+            turn: { id: "turn-id", items: [], itemsView: "full", status: "completed", error: null }
         } as any);
 
         vi.spyOn(codexAcpAgent, "getSessionState").mockReturnValue(createTestSessionState({
@@ -411,6 +412,7 @@ describe('ACP server test', { timeout: 40_000 }, () => {
         return {
             id,
             items: [],
+            itemsView: "full" as const,
             status,
             error: null,
             startedAt: null,
@@ -440,11 +442,11 @@ describe('ACP server test', { timeout: 40_000 }, () => {
 
         fixture.getCodexAppServerClient().listSkills = vi.fn().mockResolvedValue({ data: [] });
         fixture.getCodexAppServerClient().turnStart = vi.fn().mockResolvedValue({
-            turn: { id: "turn-id", items: [], status: "inProgress", error: null }
+            turn: { id: "turn-id", items: [], itemsView: "full", status: "inProgress", error: null }
         });
         fixture.getCodexAppServerClient().awaitTurnCompleted = vi.fn().mockResolvedValue({
             threadId: "id",
-            turn: { id: "turn-id", items: [], status: "completed", error: null }
+            turn: { id: "turn-id", items: [], itemsView: "full", status: "completed", error: null }
         });
         const sessionState: SessionState = createTestSessionState({
             sessionId: "id",
@@ -464,11 +466,11 @@ describe('ACP server test', { timeout: 40_000 }, () => {
         const codexAcpAgent = mockFixture.getCodexAcpAgent();
 
         mockFixture.getCodexAppServerClient().turnStart = vi.fn().mockResolvedValue({
-            turn: { id: "turn-id", items: [], status: "inProgress", error: null }
+            turn: { id: "turn-id", items: [], itemsView: "full", status: "inProgress", error: null }
         });
         mockFixture.getCodexAppServerClient().awaitTurnCompleted = vi.fn().mockResolvedValue({
             threadId: "id",
-            turn: { id: "turn-id", items: [], status: "completed", error: null }
+            turn: { id: "turn-id", items: [], itemsView: "full", status: "completed", error: null }
         });
 
         const sessionState: SessionState = createTestSessionState({
@@ -510,7 +512,7 @@ describe('ACP server test', { timeout: 40_000 }, () => {
         const codexAcpAgent = mockFixture.getCodexAcpAgent();
 
         mockFixture.getCodexAppServerClient().turnStart = vi.fn().mockResolvedValue({
-            turn: { id: "turn-id", items: [], status: "inProgress", error: null }
+            turn: { id: "turn-id", items: [], itemsView: "full", status: "inProgress", error: null }
         });
 
         const sessionState1: SessionState = createTestSessionState({
@@ -652,6 +654,7 @@ describe('ACP server test', { timeout: 40_000 }, () => {
             turn: {
                 id: "turn-id",
                 items: [],
+                itemsView: "full",
                 status: "completed",
                 error: null,
                 startedAt: null,
@@ -829,6 +832,7 @@ describe('ACP server test', { timeout: 40_000 }, () => {
             defaultReasoningEffort: 'medium',
             supportsPersonality: false,
             additionalSpeedTiers: [],
+            serviceTiers: [],
             isDefault: false,
             inputModalities: []
         },
@@ -847,6 +851,7 @@ describe('ACP server test', { timeout: 40_000 }, () => {
             defaultReasoningEffort: 'low',
             supportsPersonality: false,
             additionalSpeedTiers: [],
+            serviceTiers: [],
             isDefault: true,
             inputModalities: []
         }
@@ -873,6 +878,7 @@ describe('ACP server test', { timeout: 40_000 }, () => {
             turn: {
                 id: "turn-id",
                 items: [],
+                itemsView: "full",
                 status: "inProgress",
                 error: null,
                 startedAt: null,
@@ -885,6 +891,7 @@ describe('ACP server test', { timeout: 40_000 }, () => {
             turn: {
                 id: "turn-id",
                 items: [],
+                itemsView: "full",
                 status: "completed",
                 error: null,
                 startedAt: null,

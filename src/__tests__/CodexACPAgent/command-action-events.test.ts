@@ -25,6 +25,7 @@ describe('CodexEventHandler - command action events', () => {
             params: {
                 threadId: sessionId,
                 turnId: 'turn-1',
+                startedAtMs: 0,
                 item: {
                     type: 'commandExecution',
                     id: 'command-list-path',
@@ -60,6 +61,7 @@ describe('CodexEventHandler - command action events', () => {
             params: {
                 threadId: sessionId,
                 turnId: 'turn-1',
+                startedAtMs: 0,
                 item: {
                     type: 'commandExecution',
                     id: 'command-list-no-path',
@@ -95,6 +97,7 @@ describe('CodexEventHandler - command action events', () => {
             params: {
                 threadId: sessionId,
                 turnId: 'turn-1',
+                startedAtMs: 0,
                 item: {
                     type: 'commandExecution',
                     id: 'command-search-query-path',
@@ -131,6 +134,7 @@ describe('CodexEventHandler - command action events', () => {
             params: {
                 threadId: sessionId,
                 turnId: 'turn-1',
+                startedAtMs: 0,
                 item: {
                     type: 'commandExecution',
                     id: 'command-search-query-only',
@@ -167,6 +171,7 @@ describe('CodexEventHandler - command action events', () => {
             params: {
                 threadId: sessionId,
                 turnId: 'turn-1',
+                startedAtMs: 0,
                 item: {
                     type: 'commandExecution',
                     id: 'command-search-path-only',
@@ -203,6 +208,7 @@ describe('CodexEventHandler - command action events', () => {
             params: {
                 threadId: sessionId,
                 turnId: 'turn-1',
+                startedAtMs: 0,
                 item: {
                     type: 'commandExecution',
                     id: 'command-search-no-query-no-path',
@@ -239,6 +245,7 @@ describe('CodexEventHandler - command action events', () => {
             params: {
                 threadId: sessionId,
                 turnId: 'turn-1',
+                startedAtMs: 0,
                 item: {
                     type: "mcpToolCall",
                     id: "call-id",
@@ -267,6 +274,7 @@ describe('CodexEventHandler - command action events', () => {
                 params: {
                     threadId: sessionId,
                     turnId: 'turn-1',
+                    startedAtMs: 0,
                     item: {
                         type: "mcpToolCall",
                         id: "call-id",
@@ -294,6 +302,7 @@ describe('CodexEventHandler - command action events', () => {
                 params: {
                     threadId: sessionId,
                     turnId: 'turn-1',
+                    completedAtMs: 0,
                     item: {
                         type: "mcpToolCall",
                         id: "call-id",
@@ -326,6 +335,7 @@ describe('CodexEventHandler - command action events', () => {
                 params: {
                     threadId: sessionId,
                     turnId: 'turn-1',
+                    startedAtMs: 0,
                     item: {
                         type: "mcpToolCall",
                         id: "call-id",
@@ -362,6 +372,7 @@ describe('CodexEventHandler - command action events', () => {
                 params: {
                     threadId: sessionId,
                     turnId: 'turn-1',
+                    completedAtMs: 0,
                     item: {
                         type: "mcpToolCall",
                         id: "call-id",
@@ -392,6 +403,7 @@ describe('CodexEventHandler - command action events', () => {
             params: {
                 threadId: sessionId,
                 turnId: 'turn-1',
+                startedAtMs: 0,
                 item: {
                     type: "dynamicToolCall",
                     id: "dyn-call-id",

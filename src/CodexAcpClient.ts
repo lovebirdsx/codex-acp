@@ -28,6 +28,7 @@ import type {
     ListMcpServerStatusParams,
     ListMcpServerStatusResponse,
     Model,
+    SkillsListExtraRootsForCwd,
     SkillsListParams,
     SkillsListResponse,
     Thread,
@@ -221,7 +222,7 @@ export class CodexAcpClient {
             sessionId: request.sessionId,
             currentModelId: currentModelId,
             models: codexModels,
-            currentServiceTier: response.serviceTier ?? null,
+            currentServiceTier: toKnownServiceTier(response.serviceTier),
         }
     }
 
@@ -244,7 +245,7 @@ export class CodexAcpClient {
             sessionId: request.sessionId,
             currentModelId: currentModelId,
             models: codexModels,
-            currentServiceTier: response.serviceTier ?? null,
+            currentServiceTier: toKnownServiceTier(response.serviceTier),
             thread: response.thread,
         };
     }
@@ -274,7 +275,7 @@ export class CodexAcpClient {
             sessionId: response.thread.id,
             currentModelId: currentModelId,
             models: codexModels,
-            currentServiceTier: response.serviceTier ?? null,
+            currentServiceTier: toKnownServiceTier(response.serviceTier),
         };
     }
 
@@ -337,14 +338,15 @@ export class CodexAcpClient {
             return;
         }
         const additionalRoots = readAdditionalRoots(meta);
-        await this.codexClient.listSkills({
+        const params: SkillsListParams & { perCwdExtraUserRoots?: SkillsListExtraRootsForCwd[] } = {
             cwds: [cwd],
             forceReload: true,
             perCwdExtraUserRoots: [{
                 cwd: cwd,
                 extraUserRoots: additionalRoots
             }]
-        });
+        };
+        await this.codexClient.listSkills(params);
     }
 
     /**
@@ -676,6 +678,16 @@ function readAdditionalRoots(meta: Record<string, unknown> | null | undefined): 
         .filter((value): value is string => typeof value === "string")
         .map(value => value.trim())
         .filter(value => value.length > 0)));
+}
+
+function toKnownServiceTier(serviceTier: string | null): ServiceTier | null {
+    switch (serviceTier) {
+        case "fast":
+        case "flex":
+            return serviceTier;
+        default:
+            return null;
+    }
 }
 
 function mergeGatewayConfig(config: JsonObject, gatewayConfig: GatewayConfig | null): JsonObject {
