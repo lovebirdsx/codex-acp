@@ -22,7 +22,7 @@ export interface SpawnedAgentFixture {
     readonly workspaceDir: string;
     createSession(mcpServers?: acp.McpServer[]): Promise<acp.NewSessionResponse>;
     restart(): Promise<SpawnedAgentFixture>;
-    writeSkill(skill: TestSkill): void;
+    writeSkill(skill: TestSkill, rootDir?: string): void;
     setPermissionResponder(responder: PermissionResponder): void;
     expectPromptText(
         sessionId: string,
@@ -43,25 +43,37 @@ type ConnectionInitializer = (connection: acp.ClientSideConnection) => Promise<v
 export async function createSpawnedAgentFixture(
     initializeConnection: ConnectionInitializer,
     extraEnv?: NodeJS.ProcessEnv,
-    paths = RuntimePaths.createTemporary(),
+    mcpServers?: acp.McpServerStdio[],
+    paths?: RuntimePaths,
+    client?: RecordingClient,
 ): Promise<SpawnedAgentFixture> {
+    const resolvedPaths = paths ?? RuntimePaths.createTemporary();
+    const configuredMcpServers = mcpServers ?? [];
+    writeCodexHomeConfig(resolvedPaths.codexHome, {
+        model: DEFAULT_TEST_MODEL_ID.model,
+        model_reasoning_effort: DEFAULT_TEST_MODEL_ID.effort,
+        web_search: "disabled",
+    }, configuredMcpServers);
+
+    const resolvedClient = client ?? new RecordingClient();
     const agentProcess = spawn("npm", ["run", "--silent", "start"], {
         cwd: process.cwd(),
         env: {
             ...process.env,
-            CODEX_HOME: paths.codexHome,
-            APP_SERVER_LOGS: paths.appServerLogsDir,
+            CODEX_HOME: resolvedPaths.codexHome,
+            APP_SERVER_LOGS: resolvedPaths.appServerLogsDir,
             ...extraEnv,
         },
         stdio: ["pipe", "pipe", "pipe"],
     });
 
     const fixture = new SpawnedAgentFixtureImpl(
-        new RecordingClient(),
+        resolvedClient,
         agentProcess,
-        paths,
+        resolvedPaths,
         initializeConnection,
-        extraEnv,
+        extraEnv ?? {},
+        configuredMcpServers,
     );
     await initializeConnection(fixture.connection);
     return fixture;
@@ -84,11 +96,6 @@ class RuntimePaths {
         for (const dir of [paths.rootDir, paths.codexHome, paths.workspaceDir, paths.appServerLogsDir]) {
             fs.mkdirSync(dir, {recursive: true});
         }
-        writeCodexHomeConfig(paths.codexHome, {
-            model: DEFAULT_TEST_MODEL_ID.model,
-            model_reasoning_effort: DEFAULT_TEST_MODEL_ID.effort,
-            web_search: "disabled",
-        });
         return paths;
     }
 }
@@ -145,7 +152,8 @@ class SpawnedAgentFixtureImpl implements SpawnedAgentFixture {
         private readonly agentProcess: ChildProcessWithoutNullStreams,
         private readonly paths: RuntimePaths,
         private readonly initializeConnection: ConnectionInitializer,
-        private readonly extraEnv?: NodeJS.ProcessEnv,
+        private readonly extraEnv: NodeJS.ProcessEnv,
+        private readonly mcpServers: acp.McpServerStdio[],
     ) {
         const output = Readable.toWeb(agentProcess.stdout) as ReadableStream<Uint8Array>;
         this.connection = new acp.ClientSideConnection(
@@ -167,11 +175,12 @@ class SpawnedAgentFixtureImpl implements SpawnedAgentFixture {
 
     async restart(): Promise<SpawnedAgentFixture> {
         await this.stopProcess(false);
-        return await createSpawnedAgentFixture(this.initializeConnection, this.extraEnv, this.paths);
+        return await createSpawnedAgentFixture(this.initializeConnection, this.extraEnv, this.mcpServers, this.paths, this.client);
     }
 
-    writeSkill(skill: TestSkill): void {
-        const skillDirectory = path.join(this.paths.codexHome, "skills", skill.name);
+    writeSkill(skill: TestSkill, rootDir?: string): void {
+        const skillsRoot = rootDir ?? path.join(this.paths.codexHome, "skills");
+        const skillDirectory = path.join(skillsRoot, skill.name);
         fs.mkdirSync(skillDirectory, {recursive: true});
         fs.writeFileSync(
             path.join(skillDirectory, "SKILL.md"),
