@@ -172,13 +172,17 @@ export class CodexAppServerClient {
         });
 
         try {
+            const turnStartPromise = this.turnStart(params);
             const turnStartedResult = cancellation
                 ? await Promise.race([
-                    this.turnStart(params).then(response => ({type: "started" as const, response})),
+                    turnStartPromise.then(response => ({type: "started" as const, response})),
                     cancellation.then(completion => ({type: "cancelled" as const, completion})),
                 ])
-                : {type: "started" as const, response: await this.turnStart(params)};
+                : {type: "started" as const, response: await turnStartPromise};
             if (turnStartedResult.type === "cancelled") {
+                void turnStartPromise.then((response) => {
+                    onTurnStarted?.(response.turn.id);
+                }).catch(() => {});
                 return turnStartedResult.completion;
             }
 

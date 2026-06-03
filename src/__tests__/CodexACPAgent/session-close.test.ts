@@ -775,7 +775,7 @@ describe("CodexACPAgent - session close", () => {
         await closePromise;
     });
 
-    it("keeps a pending turn start alive until the delayed turn id is interrupted", async () => {
+    it("cancels a pending turn start without waiting for an id", async () => {
         const fixture = createCodexMockTestFixture();
         const sessionId = await createSession(fixture);
         const agent = fixture.getCodexAcpAgent();
@@ -783,10 +783,7 @@ describe("CodexACPAgent - session close", () => {
 
         const turnStartPromise = new Promise<{ turn: Turn }>(() => {});
         const turnStartSpy = vi.spyOn(codexAppServerClient, "turnStart").mockReturnValue(turnStartPromise);
-        vi.spyOn(codexAppServerClient, "awaitTurnCompleted").mockResolvedValue({
-            threadId: sessionId,
-            turn: createTurn("delayed-turn-id", "interrupted"),
-        });
+        const awaitTurnCompletedSpy = vi.spyOn(codexAppServerClient, "awaitTurnCompleted");
         const interruptSpy = vi.spyOn(codexAppServerClient, "turnInterrupt").mockResolvedValue({});
         const unsubscribeSpy = vi.spyOn(codexAppServerClient, "threadUnsubscribe").mockResolvedValue({
             status: "unsubscribed",
@@ -801,30 +798,17 @@ describe("CodexACPAgent - session close", () => {
             expect(turnStartSpy).toHaveBeenCalled();
         });
 
-        let promptResolved = false;
-        void promptPromise.then(() => {
-            promptResolved = true;
-        });
         const closePromise = agent.closeSession({ sessionId });
-        await flushAsyncWork();
-        expect(promptResolved).toBe(false);
-        expect(interruptSpy).not.toHaveBeenCalled();
-        expect(unsubscribeSpy).not.toHaveBeenCalled();
 
-        fixture.sendServerNotification(createTurnStartedNotification(sessionId, "delayed-turn-id"));
-
-        await vi.waitFor(() => {
-            expect(interruptSpy).toHaveBeenCalledWith({
-                threadId: sessionId,
-                turnId: "delayed-turn-id",
-            });
-        });
         await expect(promptPromise).resolves.toMatchObject({ stopReason: "cancelled" });
-        await closePromise;
+        await expect(closePromise).resolves.toEqual({});
+        expect(interruptSpy).not.toHaveBeenCalled();
+        expect(awaitTurnCompletedSpy).not.toHaveBeenCalled();
         expect(unsubscribeSpy).toHaveBeenCalledWith({ threadId: sessionId });
+        expect(getTurnCompletionCaptureCount(codexAppServerClient)).toBe(0);
     });
 
-    it("interrupts a delayed turn start response after close begins", async () => {
+    it("interrupts a delayed turn start response after close completes", async () => {
         const fixture = createCodexMockTestFixture();
         const sessionId = await createSession(fixture);
         const agent = fixture.getCodexAcpAgent();
@@ -854,9 +838,10 @@ describe("CodexACPAgent - session close", () => {
         });
 
         const closePromise = agent.closeSession({ sessionId });
-        await flushAsyncWork();
+        await expect(promptPromise).resolves.toMatchObject({ stopReason: "cancelled" });
+        await expect(closePromise).resolves.toEqual({});
         expect(interruptSpy).not.toHaveBeenCalled();
-        expect(unsubscribeSpy).not.toHaveBeenCalled();
+        expect(unsubscribeSpy).toHaveBeenCalledWith({ threadId: sessionId });
 
         resolveTurnStart({ turn: createTurn("delayed-response-turn-id", "inProgress") });
 
@@ -866,9 +851,6 @@ describe("CodexACPAgent - session close", () => {
                 turnId: "delayed-response-turn-id",
             });
         });
-        await expect(promptPromise).resolves.toMatchObject({ stopReason: "cancelled" });
-        await closePromise;
-        expect(unsubscribeSpy).toHaveBeenCalledWith({ threadId: sessionId });
     });
 
     it("interrupts a turn-start notification that arrives after close begins", async () => {
@@ -969,10 +951,6 @@ describe("CodexACPAgent - session close", () => {
         });
 
         const closePromise = agent.closeSession({ sessionId });
-        await flushAsyncWork();
-        expect(interruptSpy).not.toHaveBeenCalled();
-        expect(unsubscribeSpy).not.toHaveBeenCalled();
-
         fixture.sendServerNotification(createTurnStartedNotification(sessionId, "observed-turn-id"));
 
         await vi.waitFor(() => {
@@ -981,8 +959,10 @@ describe("CodexACPAgent - session close", () => {
                 turnId: "observed-turn-id",
             });
         });
-        await flushAsyncWork();
-        expect(unsubscribeSpy).not.toHaveBeenCalled();
+        await expect(firstPrompt).resolves.toMatchObject({ stopReason: "cancelled" });
+        await expect(secondPrompt).resolves.toMatchObject({ stopReason: "cancelled" });
+        await expect(closePromise).resolves.toEqual({});
+        expect(unsubscribeSpy).toHaveBeenCalledWith({ threadId: sessionId });
 
         turnStartResolvers.get("First")!({ turn: createTurn("first-response-turn-id", "inProgress") });
         await vi.waitFor(() => {
@@ -991,8 +971,6 @@ describe("CodexACPAgent - session close", () => {
                 turnId: "first-response-turn-id",
             });
         });
-        await expect(firstPrompt).resolves.toMatchObject({ stopReason: "cancelled" });
-        expect(unsubscribeSpy).not.toHaveBeenCalled();
 
         turnStartResolvers.get("Second")!({ turn: createTurn("second-response-turn-id", "inProgress") });
         await vi.waitFor(() => {
@@ -1001,11 +979,8 @@ describe("CodexACPAgent - session close", () => {
                 turnId: "second-response-turn-id",
             });
         });
-        await expect(secondPrompt).resolves.toMatchObject({ stopReason: "cancelled" });
-        await closePromise;
 
         expect(interruptSpy).toHaveBeenCalledTimes(3);
-        expect(unsubscribeSpy).toHaveBeenCalledWith({ threadId: sessionId });
     });
 
     it("cancels ambiguous pending prompts when an observed turn interrupt fails", async () => {
@@ -1044,10 +1019,6 @@ describe("CodexACPAgent - session close", () => {
         });
 
         const closePromise = agent.closeSession({ sessionId });
-        await flushAsyncWork();
-        expect(interruptSpy).not.toHaveBeenCalled();
-        expect(unsubscribeSpy).not.toHaveBeenCalled();
-
         fixture.sendServerNotification(createTurnStartedNotification(sessionId, "observed-turn-id"));
 
         await expect(firstPrompt).resolves.toMatchObject({ stopReason: "cancelled" });

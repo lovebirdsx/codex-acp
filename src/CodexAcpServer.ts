@@ -1323,9 +1323,7 @@ export class CodexAcpServer implements acp.Agent {
             activePrompt.turnId = this.unassignedCurrentTurnId(sessionState);
         }
         if (!activePrompt.turnId) {
-            if (!activePrompt.turnStartRequested) {
-                this.cancelActivePrompt(activePrompt);
-            }
+            this.cancelActivePrompt(activePrompt);
             return;
         }
         const interrupted = await this.interruptTurnOnce(sessionState, activePrompt.turnId, reason);
