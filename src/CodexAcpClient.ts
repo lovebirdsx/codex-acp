@@ -371,15 +371,27 @@ export class CodexAcpClient {
         sessionId: string,
         eventHandler: (result: ServerNotification) => void,
         approvalHandler: ApprovalHandler,
-        elicitationHandler: ElicitationHandler
-    ) {
+        elicitationHandler: ElicitationHandler,
+        cancellation?: Promise<void>,
+    ): Promise<boolean> {
         const pendingTurnStartFence = this.codexClient.pendingTurnStartFence(sessionId);
         if (pendingTurnStartFence) {
-            await pendingTurnStartFence;
+            if (cancellation) {
+                const fenceResult = await Promise.race([
+                    pendingTurnStartFence.then(() => "ready" as const),
+                    cancellation.then(() => "cancelled" as const),
+                ]);
+                if (fenceResult === "cancelled") {
+                    return false;
+                }
+            } else {
+                await pendingTurnStartFence;
+            }
         }
         this.codexClient.onServerNotification(sessionId, eventHandler);
         this.codexClient.onApprovalRequest(sessionId, approvalHandler);
         this.codexClient.onElicitationRequest(sessionId, elicitationHandler);
+        return true;
     }
 
     disposeSession(sessionId: string): void {

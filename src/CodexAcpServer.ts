@@ -1029,7 +1029,7 @@ export class CodexAcpServer implements acp.Agent {
             );
             const approvalHandler = new CodexApprovalHandler(this.connection, sessionState);
             const elicitationHandler = new CodexElicitationHandler(this.connection, sessionState);
-            await this.codexAcpClient.subscribeToSessionEvents(params.sessionId,
+            const subscribed = await this.codexAcpClient.subscribeToSessionEvents(params.sessionId,
                 (event) => {
                     if (sessionState.closed) {
                         return this.handleClosingPromptNotification(sessionState, eventHandler, event);
@@ -1038,7 +1038,11 @@ export class CodexAcpServer implements acp.Agent {
                     return eventHandler.handleNotification(event);
                 },
                 approvalHandler,
-                elicitationHandler);
+                elicitationHandler,
+                activePrompt.cancellation);
+            if (!subscribed || activePrompt.cancelled) {
+                return this.createCancelledPromptResponse(sessionState);
+            }
 
             if (await this.availableCommands.tryHandleCommand(params.prompt, sessionState)) {
                 logger.log("Prompt handled by a command");

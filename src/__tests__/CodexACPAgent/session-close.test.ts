@@ -633,7 +633,7 @@ describe("CodexACPAgent - session close", () => {
         expect(turnStartSpy).not.toHaveBeenCalled();
     });
 
-    it("waits for a cancelled slash command prompt to finish before unsubscribing", async () => {
+    it("cancels a slow slash command prompt before unsubscribing", async () => {
         const fixture = createCodexMockTestFixture();
         const sessionId = await createSession(fixture, "session-id", {
             availableCommands: new Promise<SkillsListResponse>(() => {}),
@@ -661,17 +661,15 @@ describe("CodexACPAgent - session close", () => {
         });
 
         const closePromise = agent.closeSession({ sessionId });
-        await flushAsyncWork();
-        expect(unsubscribeSpy).not.toHaveBeenCalled();
-
         fixture.clearAcpConnectionDump();
-        resolveSkills({ data: [] });
 
         await expect(promptPromise).resolves.toMatchObject({ stopReason: "cancelled" });
-        await closePromise;
+        await expect(closePromise).resolves.toEqual({});
 
         expect(unsubscribeSpy).toHaveBeenCalledWith({ threadId: sessionId });
         expect(fixture.getAcpConnectionEvents([])).toEqual([]);
+
+        resolveSkills({ data: [] });
     });
 
     it("suppresses queued available command updates after close", async () => {
@@ -908,6 +906,63 @@ describe("CodexACPAgent - session close", () => {
             turn: createTurn("new-turn-id", "completed"),
         });
         await expect(reopenedPrompt).resolves.toMatchObject({ stopReason: "end_turn" });
+    });
+
+    it("cancels a reopened prompt that is waiting on an unidentified stale turn-start fence", async () => {
+        const fixture = createCodexMockTestFixture();
+        const sessionId = await createSession(fixture);
+        const agent = fixture.getCodexAcpAgent();
+        const codexAppServerClient = fixture.getCodexAppServerClient();
+        const turnStartResolvers = new Map<string, (value: { turn: Turn }) => void>();
+
+        vi.spyOn(codexAppServerClient, "turnStart").mockImplementation((params: TurnStartParams) => {
+            const firstInput = params.input[0];
+            const text = firstInput?.type === "text" ? firstInput.text : "";
+            return new Promise((resolve) => {
+                turnStartResolvers.set(text, resolve);
+            });
+        });
+        vi.spyOn(codexAppServerClient, "awaitTurnCompleted").mockResolvedValue({
+            threadId: sessionId,
+            turn: createTurn("new-turn-id", "completed"),
+        });
+        const unsubscribeSpy = vi.spyOn(codexAppServerClient, "threadUnsubscribe").mockResolvedValue({
+            status: "unsubscribed",
+        });
+        vi.spyOn(codexAppServerClient, "threadResume").mockResolvedValue(
+            createThreadResumeResponse(sessionId)
+        );
+
+        const oldPrompt = agent.prompt({
+            sessionId,
+            prompt: [{ type: "text", text: "Old" }],
+        });
+
+        await vi.waitFor(() => {
+            expect(turnStartResolvers.has("Old")).toBe(true);
+        });
+
+        await expect(agent.closeSession({ sessionId })).resolves.toEqual({});
+        await expect(oldPrompt).resolves.toMatchObject({ stopReason: "cancelled" });
+
+        await agent.resumeSession({
+            sessionId,
+            cwd: "/workspace",
+            mcpServers: [],
+        });
+
+        const reopenedPrompt = agent.prompt({
+            sessionId,
+            prompt: [{ type: "text", text: "New" }],
+        });
+        await flushAsyncWork();
+        expect(turnStartResolvers.has("New")).toBe(false);
+
+        await expect(agent.closeSession({ sessionId })).resolves.toEqual({});
+        await expect(reopenedPrompt).resolves.toMatchObject({ stopReason: "cancelled" });
+        expect(turnStartResolvers.has("New")).toBe(false);
+        expect(unsubscribeSpy).toHaveBeenCalledTimes(2);
+        expect(unsubscribeSpy).toHaveBeenLastCalledWith({ threadId: sessionId });
     });
 
     it("interrupts a delayed turn start response after close completes", async () => {
