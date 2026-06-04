@@ -41,7 +41,7 @@ describe('CodexEventHandler - file change events', () => {
     });
 
     it('should handle new file creation', async () => {
-        const newFileNotification: ServerNotification = {
+        const newFileNotification = {
             method: 'item/started',
             params: {
                 threadId: sessionId,
@@ -76,7 +76,7 @@ describe('CodexEventHandler - file change events', () => {
     });
 
     it('should handle multiple new files in single change', async () => {
-        const multiFileNotification: ServerNotification = {
+        const multiFileNotification = {
             method: 'item/started',
             params: {
                 threadId: sessionId,
@@ -116,7 +116,7 @@ describe('CodexEventHandler - file change events', () => {
 
     it('should handle new file creation with raw content', async () => {
         // Codex sends raw file content (not unified diff) for new files
-        const newFileNotification: ServerNotification = {
+        const newFileNotification = {
             method: 'item/started',
             params: {
                 threadId: sessionId,
@@ -144,7 +144,7 @@ describe('CodexEventHandler - file change events', () => {
     });
 
     it('should handle file deletion', async () => {
-        const deleteFileNotification: ServerNotification = {
+        const deleteFileNotification = {
             method: 'item/started',
             params: {
                 threadId: sessionId,
@@ -180,7 +180,7 @@ describe('CodexEventHandler - file change events', () => {
         mockFileContent('/test/project/RawDeleteFile.kt', 'fun main() {\n    println("Hello, World!")\n}\n');
 
         // Codex sends raw file content (not unified diff) for deleted files
-        const deletedFileNotification: ServerNotification = {
+        const deletedFileNotification = {
             method: 'item/started',
             params: {
                 threadId: sessionId,
@@ -210,7 +210,7 @@ describe('CodexEventHandler - file change events', () => {
     it('should handle file deletion when old file is already missing', async () => {
         removeMockFile('/test/project/OldFile.kt');
 
-        const deleteFileNotification: ServerNotification = {
+        const deleteFileNotification = {
             method: 'item/started',
             params: {
                 threadId: sessionId,
@@ -245,7 +245,7 @@ describe('CodexEventHandler - file change events', () => {
     it('should handle file deletion with raw content when old file is already missing', async () => {
         removeMockFile('/test/project/RawDeleteFile.kt');
 
-        const deletedFileNotification: ServerNotification = {
+        const deletedFileNotification = {
             method: 'item/started',
             params: {
                 threadId: sessionId,

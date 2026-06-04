@@ -10,7 +10,7 @@ import fs from "node:fs";
 import os from "node:os";
 import {AgentMode} from "../AgentMode";
 import {expect, vi} from "vitest";
-import type {Model, ReasoningEffortOption} from "../app-server/v2";
+import type {Model, ReasoningEffortOption, Turn} from "../app-server/v2";
 
 export type MethodCallEvent = { method: string; args: any[] };
 
@@ -366,7 +366,23 @@ export function createTestModel(overrides?: Partial<Model>): Model {
         inputModalities: ["text", "image"],
         supportsPersonality: false,
         additionalSpeedTiers: [],
+        serviceTiers: [],
+        defaultServiceTier: null,
         isDefault: true,
+        ...overrides,
+    };
+}
+
+export function createTestTurn(overrides?: Partial<Turn>): Turn {
+    return {
+        id: "turn-id",
+        items: [],
+        itemsView: "full",
+        status: "inProgress",
+        error: null,
+        startedAt: null,
+        completedAt: null,
+        durationMs: null,
         ...overrides,
     };
 }
@@ -384,27 +400,13 @@ export function setupPromptTestSession(sessionOverrides?: Partial<SessionState>)
 export function mockPromptTurn(fixture: CodexMockTestFixture, sessionId: string) {
     const codexAppServerClient = fixture.getCodexAppServerClient();
     const turnStartSpy = vi.spyOn(codexAppServerClient, "turnStart").mockResolvedValue({
-        turn: {
-            id: "turn-id",
-            items: [],
-            status: "inProgress",
-            error: null,
-            startedAt: null,
-            completedAt: null,
-            durationMs: null,
-        }
+        turn: createTestTurn()
     });
     vi.spyOn(codexAppServerClient, "awaitTurnCompleted").mockResolvedValue({
         threadId: sessionId,
-        turn: {
-            id: "turn-id",
-            items: [],
+        turn: createTestTurn({
             status: "completed",
-            error: null,
-            startedAt: null,
-            completedAt: null,
-            durationMs: null,
-        }
+        })
     });
 
     return turnStartSpy;
@@ -414,11 +416,11 @@ export async function setupPromptAndSendNotifications(
     fixture: CodexMockTestFixture,
     sessionId: string,
     sessionState: SessionState,
-    notifications: ServerNotification[]
+    notifications: Array<ServerNotification | Record<string, unknown>>
 ): Promise<void> {
     const codexAcpAgent = fixture.getCodexAcpAgent();
     const codexAppServerClient = fixture.getCodexAppServerClient();
-    const turn = { id: "turn-id", items: [], status: "inProgress" as const, error: null };
+    const turn = createTestTurn();
 
     codexAppServerClient.turnStart = vi.fn().mockResolvedValue({
         turn,

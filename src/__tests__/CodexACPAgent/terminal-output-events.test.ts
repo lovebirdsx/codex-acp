@@ -20,7 +20,7 @@ describe('CodexEventHandler - terminal output events', () => {
     });
 
     it('should send terminal info when command execution starts', async () => {
-        const commandStartNotification: ServerNotification = {
+        const commandStartNotification = {
             method: 'item/started',
             params: {
                 threadId: sessionId,
@@ -57,7 +57,7 @@ describe('CodexEventHandler - terminal output events', () => {
         { command: "/bin/bash -lc './tests.cmd -Darg=value'", expected: './tests.cmd -Darg=value' },
         { command: "/bin/zsh -c 'echo hello'", expected: 'echo hello' },
     ])('should strip shell prefix from "$command"', async ({ command, expected }) => {
-        const commandStartNotification: ServerNotification = {
+        const commandStartNotification = {
             method: 'item/started',
             params: {
                 threadId: sessionId,
@@ -87,7 +87,7 @@ describe('CodexEventHandler - terminal output events', () => {
     });
 
     it('should stream terminal output delta', async () => {
-        const outputDeltaNotification: ServerNotification = {
+        const outputDeltaNotification = {
             method: 'item/commandExecution/outputDelta',
             params: {
                 threadId: sessionId,
@@ -105,7 +105,7 @@ describe('CodexEventHandler - terminal output events', () => {
     });
 
     it('should send formatted output on command completion', async () => {
-        const commandCompletedNotification: ServerNotification = {
+        const commandCompletedNotification = {
             method: 'item/completed',
             params: {
                 threadId: sessionId,
@@ -134,7 +134,7 @@ describe('CodexEventHandler - terminal output events', () => {
     });
 
     it('should handle failed command completion', async () => {
-        const commandFailedNotification: ServerNotification = {
+        const commandFailedNotification = {
             method: 'item/completed',
             params: {
                 threadId: sessionId,
@@ -163,7 +163,7 @@ describe('CodexEventHandler - terminal output events', () => {
     });
 
     it('should send status update when dynamic tool call completes', async () => {
-        const dynamicToolCompletedNotification: ServerNotification = {
+        const dynamicToolCompletedNotification = {
             method: 'item/completed',
             params: {
                 threadId: sessionId,
@@ -190,7 +190,7 @@ describe('CodexEventHandler - terminal output events', () => {
     });
 
     it('should handle full terminal output flow: start -> delta -> complete', async () => {
-        const commandStartNotification: ServerNotification = {
+        const commandStartNotification = {
             method: 'item/started',
             params: {
                 threadId: sessionId,
@@ -211,7 +211,7 @@ describe('CodexEventHandler - terminal output events', () => {
             },
         };
 
-        const outputDeltaNotification: ServerNotification = {
+        const outputDeltaNotification = {
             method: 'item/commandExecution/outputDelta',
             params: {
                 threadId: sessionId,
@@ -221,7 +221,7 @@ describe('CodexEventHandler - terminal output events', () => {
             },
         };
 
-        const commandCompletedNotification: ServerNotification = {
+        const commandCompletedNotification = {
             method: 'item/completed',
             params: {
                 threadId: sessionId,
@@ -254,7 +254,7 @@ describe('CodexEventHandler - terminal output events', () => {
     });
 
     it('should stream multiple terminal output deltas without accumulation', async () => {
-        const delta1: ServerNotification = {
+        const delta1 = {
             method: 'item/commandExecution/outputDelta',
             params: {
                 threadId: sessionId,
@@ -264,7 +264,7 @@ describe('CodexEventHandler - terminal output events', () => {
             },
         };
 
-        const delta2: ServerNotification = {
+        const delta2 = {
             method: 'item/commandExecution/outputDelta',
             params: {
                 threadId: sessionId,
@@ -274,7 +274,7 @@ describe('CodexEventHandler - terminal output events', () => {
             },
         };
 
-        const delta3: ServerNotification = {
+        const delta3 = {
             method: 'item/commandExecution/outputDelta',
             params: {
                 threadId: sessionId,

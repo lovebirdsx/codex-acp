@@ -20,7 +20,7 @@ describe('CodexEventHandler - command action events', () => {
     });
 
     it('should handle list files command with explicit path', async () => {
-        const listFilesNotification: ServerNotification = {
+        const listFilesNotification = {
             method: 'item/started',
             params: {
                 threadId: sessionId,
@@ -55,7 +55,7 @@ describe('CodexEventHandler - command action events', () => {
     });
 
     it('should handle list files command without a path', async () => {
-        const listFilesNotification: ServerNotification = {
+        const listFilesNotification = {
             method: 'item/started',
             params: {
                 threadId: sessionId,
@@ -90,7 +90,7 @@ describe('CodexEventHandler - command action events', () => {
     });
 
     it('should include the path in read file command titles', async () => {
-        const readFileNotification: ServerNotification = {
+        const readFileNotification = {
             method: 'item/started',
             params: {
                 threadId: sessionId,
@@ -126,7 +126,7 @@ describe('CodexEventHandler - command action events', () => {
     });
 
     it('should handle search command with query and path', async () => {
-        const searchNotification: ServerNotification = {
+        const searchNotification = {
             method: 'item/started',
             params: {
                 threadId: sessionId,
@@ -162,7 +162,7 @@ describe('CodexEventHandler - command action events', () => {
     });
 
     it('should handle search command with only query', async () => {
-        const searchNotification: ServerNotification = {
+        const searchNotification = {
             method: 'item/started',
             params: {
                 threadId: sessionId,
@@ -198,7 +198,7 @@ describe('CodexEventHandler - command action events', () => {
     });
 
     it('should handle search command with only path (file glob search)', async () => {
-        const searchNotification: ServerNotification = {
+        const searchNotification = {
             method: 'item/started',
             params: {
                 threadId: sessionId,
@@ -234,7 +234,7 @@ describe('CodexEventHandler - command action events', () => {
     });
 
     it('should handle search command with neither query nor path', async () => {
-        const searchNotification: ServerNotification = {
+        const searchNotification = {
             method: 'item/started',
             params: {
                 threadId: sessionId,
@@ -270,7 +270,7 @@ describe('CodexEventHandler - command action events', () => {
     });
 
     it('should handle mcp tools', async () => {
-        const searchNotification: ServerNotification = {
+        const searchNotification = {
             method: 'item/started',
             params: {
                 threadId: sessionId,
@@ -297,7 +297,7 @@ describe('CodexEventHandler - command action events', () => {
     });
 
     it('should include mcp progress and final logs', async () => {
-        const notifications: ServerNotification[] = [
+        const notifications = [
             {
                 method: 'item/started',
                 params: {
@@ -356,7 +356,7 @@ describe('CodexEventHandler - command action events', () => {
 
     it('should preserve repeated mcp progress messages in final output', async () => {
         const repeatedMessage = 'Polling for status';
-        const notifications: ServerNotification[] = [
+        const notifications = [
             {
                 method: 'item/started',
                 params: {
@@ -423,7 +423,7 @@ describe('CodexEventHandler - command action events', () => {
     });
 
     it('should handle dynamic tools', async () => {
-        const dynamicToolNotification: ServerNotification = {
+        const dynamicToolNotification = {
             method: 'item/started',
             params: {
                 threadId: sessionId,

@@ -12,7 +12,7 @@ import {
 import type {ServerNotification} from "../../app-server";
 import type {SessionState} from "../../CodexAcpServer";
 import {AgentMode} from "../../AgentMode";
-import type {Model, TurnStartParams} from "../../app-server/v2";
+import type {Model, Turn, TurnStartParams} from "../../app-server/v2";
 import type {RateLimitsMap} from "../../RateLimitsMap";
 import {ModelId} from "../../ModelId";
 
@@ -220,6 +220,7 @@ describe('ACP server test', { timeout: 40_000 }, () => {
         const codexAcpClient = mockFixture.getCodexAcpClient();
         const codexAppServerClient = mockFixture.getCodexAppServerClient();
 
+        const setSkillsExtraRootsSpy = vi.spyOn(codexAppServerClient, "setSkillsExtraRoots").mockResolvedValue({});
         const listSkillsSpy = vi.spyOn(codexAppServerClient, "listSkills").mockResolvedValue({ data: [] });
         const threadStartSpy = vi.spyOn(codexAppServerClient, "threadStart").mockResolvedValue({
             thread: { id: "thread-id" } as any,
@@ -245,6 +246,8 @@ describe('ACP server test', { timeout: 40_000 }, () => {
                 inputModalities: ["text"],
                 supportsPersonality: false,
                 additionalSpeedTiers: [],
+                serviceTiers: [],
+                defaultServiceTier: null,
                 isDefault: true
             }],
             nextCursor: null
@@ -258,14 +261,14 @@ describe('ACP server test', { timeout: 40_000 }, () => {
             }
         });
 
+        expect(setSkillsExtraRootsSpy).toHaveBeenCalledWith({
+            extraRoots: ["/skills/one", "/skills/two"]
+        });
         expect(listSkillsSpy).toHaveBeenCalledWith({
             cwds: ["/workspace"],
             forceReload: true,
-            perCwdExtraUserRoots: [{
-                cwd: "/workspace",
-                extraUserRoots: ["/skills/one", "/skills/two"]
-            }]
         });
+        expect(setSkillsExtraRootsSpy.mock.invocationCallOrder[0]!).toBeLessThan(listSkillsSpy.mock.invocationCallOrder[0]!);
         expect(listSkillsSpy.mock.invocationCallOrder[0]!).toBeLessThan(threadStartSpy.mock.invocationCallOrder[0]!);
     });
 
@@ -363,13 +366,16 @@ describe('ACP server test', { timeout: 40_000 }, () => {
         const codexAcpAgent = mockFixture.getCodexAcpAgent();
         const codexAppServerClient = mockFixture.getCodexAppServerClient();
 
+        const setSkillsExtraRootsSpy = vi.spyOn(codexAppServerClient, "setSkillsExtraRoots").mockResolvedValue({});
         const listSkillsSpy = vi.spyOn(codexAppServerClient, "listSkills").mockResolvedValue({ data: [] });
         const turnStartSpy = vi.spyOn(codexAppServerClient, "turnStart").mockResolvedValue({
-            turn: { id: "turn-id", items: [], status: "inProgress", error: null }
+            turn: { id: "turn-id", items: [], itemsView: "full",
+                status: "inProgress", error: null }
         } as any);
         vi.spyOn(codexAppServerClient, "awaitTurnCompleted").mockResolvedValue({
             threadId: "session-id",
-            turn: { id: "turn-id", items: [], status: "completed", error: null }
+            turn: { id: "turn-id", items: [], itemsView: "full",
+                status: "completed", error: null }
         } as any);
 
         vi.spyOn(codexAcpAgent, "getSessionState").mockReturnValue(createTestSessionState({
@@ -386,14 +392,14 @@ describe('ACP server test', { timeout: 40_000 }, () => {
         };
         await codexAcpAgent.prompt(promptRequest);
 
+        expect(setSkillsExtraRootsSpy).toHaveBeenCalledWith({
+            extraRoots: ["/skills/one", "/skills/two"]
+        });
         expect(listSkillsSpy).toHaveBeenCalledWith({
             cwds: ["/workspace"],
             forceReload: true,
-            perCwdExtraUserRoots: [{
-                cwd: "/workspace",
-                extraUserRoots: ["/skills/one", "/skills/two"]
-            }]
         });
+        expect(setSkillsExtraRootsSpy.mock.invocationCallOrder[0]!).toBeLessThan(listSkillsSpy.mock.invocationCallOrder[0]!);
         expect(listSkillsSpy.mock.invocationCallOrder[0]!).toBeLessThan(turnStartSpy.mock.invocationCallOrder[0]!);
     });
 
@@ -412,10 +418,11 @@ describe('ACP server test', { timeout: 40_000 }, () => {
         return onServerNotification;
     }
 
-    function createTurn(id: string, status: "inProgress" | "completed") {
+    function createTurn(id: string, status: "inProgress" | "completed"): Turn {
         return {
             id,
             items: [],
+            itemsView: "full",
             status,
             error: null,
             startedAt: null,
@@ -445,11 +452,13 @@ describe('ACP server test', { timeout: 40_000 }, () => {
 
         fixture.getCodexAppServerClient().listSkills = vi.fn().mockResolvedValue({ data: [] });
         fixture.getCodexAppServerClient().turnStart = vi.fn().mockResolvedValue({
-            turn: { id: "turn-id", items: [], status: "inProgress", error: null }
+            turn: { id: "turn-id", items: [], itemsView: "full",
+                status: "inProgress", error: null }
         });
         fixture.getCodexAppServerClient().awaitTurnCompleted = vi.fn().mockResolvedValue({
             threadId: "id",
-            turn: { id: "turn-id", items: [], status: "completed", error: null }
+            turn: { id: "turn-id", items: [], itemsView: "full",
+                status: "completed", error: null }
         });
         const sessionState: SessionState = createTestSessionState({
             sessionId: "id",
@@ -469,11 +478,13 @@ describe('ACP server test', { timeout: 40_000 }, () => {
         const codexAcpAgent = mockFixture.getCodexAcpAgent();
 
         mockFixture.getCodexAppServerClient().turnStart = vi.fn().mockResolvedValue({
-            turn: { id: "turn-id", items: [], status: "inProgress", error: null }
+            turn: { id: "turn-id", items: [], itemsView: "full",
+                status: "inProgress", error: null }
         });
         mockFixture.getCodexAppServerClient().awaitTurnCompleted = vi.fn().mockResolvedValue({
             threadId: "id",
-            turn: { id: "turn-id", items: [], status: "completed", error: null }
+            turn: { id: "turn-id", items: [], itemsView: "full",
+                status: "completed", error: null }
         });
 
         const sessionState: SessionState = createTestSessionState({
@@ -515,7 +526,8 @@ describe('ACP server test', { timeout: 40_000 }, () => {
         const codexAcpAgent = mockFixture.getCodexAcpAgent();
 
         mockFixture.getCodexAppServerClient().turnStart = vi.fn().mockResolvedValue({
-            turn: { id: "turn-id", items: [], status: "inProgress", error: null }
+            turn: { id: "turn-id", items: [], itemsView: "full",
+                status: "inProgress", error: null }
         });
 
         const sessionState1: SessionState = createTestSessionState({
@@ -657,6 +669,7 @@ describe('ACP server test', { timeout: 40_000 }, () => {
             turn: {
                 id: "turn-id",
                 items: [],
+                itemsView: "full",
                 status: "completed",
                 error: null,
                 startedAt: null,
@@ -689,7 +702,7 @@ describe('ACP server test', { timeout: 40_000 }, () => {
 
         await expect(
             fixture.getCodexAcpAgent().resumeSession({cwd: "", sessionId: sessionId})
-        ).rejects.toThrow("invalid thread id");
+        ).rejects.toThrow("invalid session id");
     });
 
     it('should return available builtin commands', async () => {
@@ -788,6 +801,7 @@ describe('ACP server test', { timeout: 40_000 }, () => {
             data: [
                 {
                     name: "fs",
+                    serverInfo: null,
                     tools: {listFiles: {name: "listFiles", inputSchema: {type: "object"}}},
                     resources: [{name: "workspace", uri: "file:///workspace"}],
                     resourceTemplates: [],
@@ -795,6 +809,7 @@ describe('ACP server test', { timeout: 40_000 }, () => {
                 },
                 {
                     name: "browser",
+                    serverInfo: null,
                     tools: {},
                     resources: [],
                     resourceTemplates: [],
@@ -852,7 +867,9 @@ describe('ACP server test', { timeout: 40_000 }, () => {
             defaultReasoningEffort: 'medium',
             supportsPersonality: false,
             additionalSpeedTiers: [],
-            isDefault: false,
+            serviceTiers: [],
+        defaultServiceTier: null,
+        isDefault: false,
             inputModalities: []
         },
         {
@@ -870,7 +887,9 @@ describe('ACP server test', { timeout: 40_000 }, () => {
             defaultReasoningEffort: 'low',
             supportsPersonality: false,
             additionalSpeedTiers: [],
-            isDefault: true,
+            serviceTiers: [],
+                defaultServiceTier: null,
+                isDefault: true,
             inputModalities: []
         }
     ];
@@ -896,6 +915,7 @@ describe('ACP server test', { timeout: 40_000 }, () => {
             turn: {
                 id: "turn-id",
                 items: [],
+                itemsView: "full",
                 status: "inProgress",
                 error: null,
                 startedAt: null,
@@ -908,6 +928,7 @@ describe('ACP server test', { timeout: 40_000 }, () => {
             turn: {
                 id: "turn-id",
                 items: [],
+                itemsView: "full",
                 status: "completed",
                 error: null,
                 startedAt: null,
@@ -1007,6 +1028,7 @@ describe('ACP server test', { timeout: 40_000 }, () => {
                 primary: { usedPercent: 25, resetsAt: null, windowDurationMins: 60 },
                 secondary: null,
                 credits: null,
+                individualLimit: null,
                 planType: null,
                 rateLimitReachedType: null,
             }
@@ -1020,6 +1042,7 @@ describe('ACP server test', { timeout: 40_000 }, () => {
                 primary: { usedPercent: 80, resetsAt: null, windowDurationMins: 1440 },
                 secondary: null,
                 credits: null,
+                individualLimit: null,
                 planType: null,
                 rateLimitReachedType: null,
             }
@@ -1073,7 +1096,8 @@ describe('ACP server test', { timeout: 40_000 }, () => {
                     primary: { usedPercent: 30, resetsAt: null, windowDurationMins: 60 },
                     secondary: null,
                     credits: null,
-                    planType: null,
+                    individualLimit: null,
+                planType: null,
                     rateLimitReachedType: null,
                 }
             }
@@ -1088,7 +1112,8 @@ describe('ACP server test', { timeout: 40_000 }, () => {
                     primary: { usedPercent: 50, resetsAt: null, windowDurationMins: 1440 },
                     secondary: null,
                     credits: null,
-                    planType: null,
+                    individualLimit: null,
+                planType: null,
                     rateLimitReachedType: null,
                 }
             }
@@ -1105,6 +1130,7 @@ describe('ACP server test', { timeout: 40_000 }, () => {
                 primary: { usedPercent: 30, resetsAt: null, windowDurationMins: 60 },
                 secondary: null,
                 credits: null,
+                individualLimit: null,
                 planType: null,
                 rateLimitReachedType: null,
             }
@@ -1118,6 +1144,7 @@ describe('ACP server test', { timeout: 40_000 }, () => {
                 primary: { usedPercent: 50, resetsAt: null, windowDurationMins: 1440 },
                 secondary: null,
                 credits: null,
+                individualLimit: null,
                 planType: null,
                 rateLimitReachedType: null,
             }

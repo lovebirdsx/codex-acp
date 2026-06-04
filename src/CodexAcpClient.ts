@@ -214,7 +214,7 @@ export class CodexAcpClient {
             sessionId: request.sessionId,
             currentModelId: currentModelId,
             models: codexModels,
-            currentServiceTier: response.serviceTier ?? null,
+            currentServiceTier: toAcpServiceTier(response.serviceTier),
         }
     }
 
@@ -231,7 +231,7 @@ export class CodexAcpClient {
             sessionId: request.sessionId,
             currentModelId: currentModelId,
             models: codexModels,
-            currentServiceTier: response.serviceTier ?? null,
+            currentServiceTier: toAcpServiceTier(response.serviceTier),
             thread: response.thread,
         };
     }
@@ -254,7 +254,7 @@ export class CodexAcpClient {
             sessionId: response.thread.id,
             currentModelId: currentModelId,
             models: codexModels,
-            currentServiceTier: response.serviceTier ?? null,
+            currentServiceTier: toAcpServiceTier(response.serviceTier),
         };
     }
 
@@ -317,13 +317,14 @@ export class CodexAcpClient {
             return;
         }
         const additionalRoots = readAdditionalRoots(meta);
+        if (additionalRoots.length > 0) {
+            await this.codexClient.setSkillsExtraRoots({
+                extraRoots: additionalRoots
+            });
+        }
         await this.codexClient.listSkills({
             cwds: [cwd],
             forceReload: true,
-            perCwdExtraUserRoots: [{
-                cwd: cwd,
-                extraUserRoots: additionalRoots
-            }]
         });
     }
 
@@ -599,6 +600,16 @@ function buildPromptItems(prompt: acp.ContentBlock[]): UserInput[] {
                 return null;
         }
     }).filter((block): block is UserInput => block !== null);
+}
+
+function toAcpServiceTier(serviceTier: string | null): ServiceTier | null {
+    switch (serviceTier) {
+        case "fast":
+        case "flex":
+            return serviceTier;
+        default:
+            return null;
+    }
 }
 
 function formatUriAsLink(name: string | null | undefined, uri: string): string {

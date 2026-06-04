@@ -33,7 +33,9 @@ describe("CodexACPAgent - loadSession", () => {
             inputModalities: ["text", "image"],
             supportsPersonality: false,
             additionalSpeedTiers: [],
-            isDefault: true,
+            serviceTiers: [],
+                defaultServiceTier: null,
+                isDefault: true,
         };
 
         codexAppServerClient.listModels = vi.fn().mockResolvedValue({
@@ -43,7 +45,10 @@ describe("CodexACPAgent - loadSession", () => {
 
         const thread: Thread = {
             id: "session-1",
+            sessionId: "session-1",
             forkedFromId: null,
+            parentThreadId: null,
+            threadSource: null,
             preview: "Hi",
             ephemeral: false,
             modelProvider: "openai",
@@ -61,6 +66,7 @@ describe("CodexACPAgent - loadSession", () => {
             turns: [
                 {
                     id: "turn-1",
+                    itemsView: "full",
                     status: "completed",
                     error: null,
                     startedAt: null,
@@ -70,6 +76,7 @@ describe("CodexACPAgent - loadSession", () => {
                         {
                             type: "userMessage",
                             id: "item-user-1",
+                            clientId: null,
                             content: [
                                 { type: "text", text: "Hi", text_elements: [] },
                                 { type: "image", url: "https://example.com/image.png" },
@@ -121,6 +128,7 @@ describe("CodexACPAgent - loadSession", () => {
                         {
                             type: "mcpToolCall",
                             id: "item-mcp-1",
+                            pluginId: null,
                             server: "github",
                             tool: "search",
                             status: "completed",
@@ -196,7 +204,9 @@ describe("CodexACPAgent - loadSession", () => {
             inputModalities: ["text"],
             supportsPersonality: false,
             additionalSpeedTiers: [],
-            isDefault: true,
+            serviceTiers: [],
+                defaultServiceTier: null,
+                isDefault: true,
         };
 
         codexAppServerClient.listModels = vi.fn().mockResolvedValue({
@@ -268,7 +278,9 @@ describe("CodexACPAgent - loadSession", () => {
             inputModalities: ["text"],
             supportsPersonality: false,
             additionalSpeedTiers: [],
-            isDefault: true,
+            serviceTiers: [],
+                defaultServiceTier: null,
+                isDefault: true,
         };
 
         codexAppServerClient.listModels = vi.fn().mockResolvedValue({

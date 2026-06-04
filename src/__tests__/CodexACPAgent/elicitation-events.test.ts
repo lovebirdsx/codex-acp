@@ -249,7 +249,7 @@ describe('Elicitation Events', () => {
             const { promptPromise, completeTurn } = setupSessionWithPendingPrompt();
             fixture.setPermissionResponse({ outcome: { outcome: 'selected', optionId: McpApprovalOptionId.AllowOnce } });
 
-            const startedNotification: ServerNotification = {
+            const startedNotification = {
                 method: 'item/started',
                 params: {
                     threadId: sessionId,
@@ -267,7 +267,7 @@ describe('Elicitation Events', () => {
                     },
                 },
             };
-            const completedNotification: ServerNotification = {
+            const completedNotification = {
                 method: 'item/completed',
                 params: {
                     threadId: sessionId,
@@ -312,7 +312,7 @@ describe('Elicitation Events', () => {
             const { promptPromise, completeTurn } = setupSessionWithPendingPrompt();
             fixture.setPermissionResponse({ outcome: { outcome: 'selected', optionId: McpApprovalOptionId.AllowOnce } });
 
-            const startedNotification: ServerNotification = {
+            const startedNotification = {
                 method: 'item/started',
                 params: {
                     threadId: sessionId,
@@ -330,7 +330,7 @@ describe('Elicitation Events', () => {
                     },
                 },
             };
-            const resolvedNotification: ServerNotification = {
+            const resolvedNotification = {
                 method: 'serverRequest/resolved',
                 params: {
                     threadId: sessionId,
