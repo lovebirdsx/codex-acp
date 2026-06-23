@@ -1223,9 +1223,7 @@ export class CodexAcpServer {
             if (!turn) {
                 return;
             }
-            void this.interruptPromptTurn(turn, "Cancel").catch((err) => {
-                logger.error("Prompt request cancellation failed to interrupt turn", err);
-            });
+            void this.requestTurnInterrupt(turn, "Cancel");
         };
 
         if (signal.aborted) {
@@ -1254,6 +1252,20 @@ export class CodexAcpServer {
             turnId: turn.turnId,
         });
         try {
+            await this.requestTurnInterrupt(turn, requestName);
+        } finally {
+            this.codexAcpClient.resolveTurnInterrupted({
+                threadId: turn.threadId,
+                turnId: turn.turnId,
+            });
+        }
+    }
+
+    private async requestTurnInterrupt(
+        turn: { threadId: string, turnId: string },
+        requestName: "Cancel" | "Close",
+    ): Promise<void> {
+        try {
             await this.runWithProcessCheck(() => this.codexAcpClient.turnInterrupt({
                 threadId: turn.threadId,
                 turnId: turn.turnId,
@@ -1264,11 +1276,6 @@ export class CodexAcpServer {
             });
         } catch (err) {
             logger.error(`${requestName} - turnInterrupt failed`, err);
-        } finally {
-            this.codexAcpClient.resolveTurnInterrupted({
-                threadId: turn.threadId,
-                turnId: turn.turnId,
-            });
         }
     }
 
