@@ -7,7 +7,30 @@
         "update": {
           "sessionUpdate": "usage_update",
           "used": 1000,
-          "size": 128000
+          "size": 128000,
+          "_meta": {
+            "quota": {
+              "token_count": {
+                "totalTokens": 1000,
+                "inputTokens": 800,
+                "cachedInputTokens": 0,
+                "outputTokens": 200,
+                "reasoningOutputTokens": 0
+              },
+              "model_usage": [
+                {
+                  "model": "model-id",
+                  "token_count": {
+                    "totalTokens": 1000,
+                    "inputTokens": 800,
+                    "cachedInputTokens": 0,
+                    "outputTokens": 200,
+                    "reasoningOutputTokens": 0
+                  }
+                }
+              ]
+            }
+          }
         }
       }
     ]
@@ -20,7 +43,30 @@
         "update": {
           "sessionUpdate": "usage_update",
           "used": 1000,
-          "size": 128000
+          "size": 128000,
+          "_meta": {
+            "quota": {
+              "token_count": {
+                "totalTokens": 2000,
+                "inputTokens": 1600,
+                "cachedInputTokens": 0,
+                "outputTokens": 400,
+                "reasoningOutputTokens": 0
+              },
+              "model_usage": [
+                {
+                  "model": "model-id",
+                  "token_count": {
+                    "totalTokens": 2000,
+                    "inputTokens": 1600,
+                    "cachedInputTokens": 0,
+                    "outputTokens": 400,
+                    "reasoningOutputTokens": 0
+                  }
+                }
+              ]
+            }
+          }
         }
       }
     ]
@@ -33,7 +79,30 @@
         "update": {
           "sessionUpdate": "usage_update",
           "used": 1500,
-          "size": 128000
+          "size": 128000,
+          "_meta": {
+            "quota": {
+              "token_count": {
+                "totalTokens": 3500,
+                "inputTokens": 2300,
+                "cachedInputTokens": 500,
+                "outputTokens": 600,
+                "reasoningOutputTokens": 100
+              },
+              "model_usage": [
+                {
+                  "model": "model-id",
+                  "token_count": {
+                    "totalTokens": 3500,
+                    "inputTokens": 2300,
+                    "cachedInputTokens": 500,
+                    "outputTokens": 600,
+                    "reasoningOutputTokens": 100
+                  }
+                }
+              ]
+            }
+          }
         }
       }
     ]
