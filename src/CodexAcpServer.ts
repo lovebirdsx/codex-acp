@@ -1416,19 +1416,23 @@ export class CodexAcpServer {
     }
 
     private buildQuotaMeta(sessionState: SessionState): { quota: QuotaMeta } {
-        const lastTokenUsage = sessionState.lastTokenUsage;
+        // Report session-cumulative usage (not just the last call) so clients can
+        // price the whole session from a single snapshot. Codex bills per model
+        // call; a single prompt may trigger several, and lastTokenUsage only
+        // carries the final one — totalTokenUsage carries them all.
+        const totalTokenUsage = sessionState.totalTokenUsage;
 
         // Remove the "[reasoning-level]" suffix from currentModelId if present
         const modelName = sessionState.currentModelId.replace(/\[.*?]$/, '');
 
         // FIXME: currently all tokens are reported for the current model
-        const modelUsage = (lastTokenUsage != null)
-            ? [{ model: modelName, token_count: lastTokenUsage }]
+        const modelUsage = (totalTokenUsage != null)
+            ? [{ model: modelName, token_count: totalTokenUsage }]
             : [];
 
         return {
             quota: {
-                token_count: sessionState.lastTokenUsage,
+                token_count: totalTokenUsage,
                 model_usage: modelUsage
             }
         };

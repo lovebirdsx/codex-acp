@@ -632,10 +632,26 @@ export class CodexEventHandler {
             return null;
         }
 
+        // Attach session-cumulative per-model usage on every model call (each
+        // emits a usage_update), so clients can price the whole session from the
+        // latest snapshot without missing the intermediate calls a single prompt
+        // makes. totalTokenUsage carries every call; lastTokenUsage only the last.
+        const total = this.sessionState.totalTokenUsage;
+        const modelName = this.sessionState.currentModelId.replace(/\[.*?]$/, "");
+        const meta = total != null
+            ? {
+                  quota: {
+                      token_count: total,
+                      model_usage: [{model: modelName, token_count: total}],
+                  },
+              }
+            : undefined;
+
         return {
             sessionUpdate: "usage_update",
             used,
             size,
+            ...(meta != null ? {_meta: meta} : {}),
         };
     }
 
