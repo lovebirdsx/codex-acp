@@ -27,6 +27,7 @@ import type {JsonValue} from "./app-server/serde_json/JsonValue";
 import {ModelId} from "./ModelId";
 import {AgentMode} from "./AgentMode";
 import path from "node:path";
+import {arePathsEqual} from "./PathUtils";
 import {logger} from "./Logger";
 import {isAccountReadAuthFailureError, isAccountReadUnavailableError} from "./CodexThreadErrors";
 import {sanitizeMcpServerName} from "./McpServerName";
