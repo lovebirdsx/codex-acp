@@ -20,6 +20,7 @@ import type {JsonValue} from "./app-server/serde_json/JsonValue";
 import {ModelId} from "./ModelId";
 import {AgentMode} from "./AgentMode";
 import path from "node:path";
+import {arePathsEqual} from "./PathUtils";
 import {logger} from "./Logger";
 import {sanitizeMcpServerName} from "./McpServerName";
 import type {
@@ -603,7 +604,7 @@ export class CodexAcpClient {
         const filterByCwd = (thread: Thread): boolean => {
             if (!requestedCwd) return true;
             if (path.isAbsolute(requestedCwd)) {
-                return thread.cwd === requestedCwd;
+                return arePathsEqual(thread.cwd, requestedCwd);
             }
             const requestedBase = path.basename(requestedCwd);
             return path.basename(thread.cwd) === requestedBase;
