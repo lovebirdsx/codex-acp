@@ -20,7 +20,7 @@ import type {JsonValue} from "./app-server/serde_json/JsonValue";
 import {ModelId} from "./ModelId";
 import {AgentMode} from "./AgentMode";
 import path from "node:path";
-import {arePathsEqual} from "./PathUtils";
+import {arePathsEqual, gitWorktreePaths} from "./PathUtils";
 import {logger} from "./Logger";
 import {sanitizeMcpServerName} from "./McpServerName";
 import type {
@@ -601,10 +601,17 @@ export class CodexAcpClient {
             "unknown",
         ];
         const requestedCwd = request.cwd?.trim() ?? null;
+        // For an absolute cwd, the editor's worktree history scope wants sessions
+        // from every sibling git worktree, not just this exact directory. Expand
+        // once and match a thread if its cwd equals any worktree in the repo.
+        const worktreeRoots =
+            requestedCwd && path.isAbsolute(requestedCwd)
+                ? gitWorktreePaths(requestedCwd)
+                : null;
         const filterByCwd = (thread: Thread): boolean => {
             if (!requestedCwd) return true;
-            if (path.isAbsolute(requestedCwd)) {
-                return arePathsEqual(thread.cwd, requestedCwd);
+            if (worktreeRoots) {
+                return worktreeRoots.some((root) => arePathsEqual(thread.cwd, root));
             }
             const requestedBase = path.basename(requestedCwd);
             return path.basename(thread.cwd) === requestedBase;
