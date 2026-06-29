@@ -27,7 +27,6 @@ import type {JsonValue} from "./app-server/serde_json/JsonValue";
 import {ModelId} from "./ModelId";
 import {AgentMode} from "./AgentMode";
 import path from "node:path";
-import {arePathsEqual} from "./PathUtils";
 import {logger} from "./Logger";
 import {isAccountReadAuthFailureError, isAccountReadUnavailableError} from "./CodexThreadErrors";
 import {sanitizeMcpServerName} from "./McpServerName";
@@ -61,7 +60,7 @@ import packageJson from "../package.json";
 import type {AuthenticationStatusResponse} from "./AcpExtensions";
 import {createCodexCollaborationMode} from "./CollaborationModeConfig";
 import type {ModeKind} from "./app-server/ModeKind";
-import {arePathBasenamesEqual, arePathsEqual, isAbsolutePathLike} from "./PathUtils";
+import {arePathBasenamesEqual, arePathsEqual, gitWorktreePaths, isAbsolutePathLike} from "./PathUtils";
 import {CodexSubagentSubscriptions} from "./subagents/CodexSubagentSubscriptions";
 import {forkSession as runForkSession} from "./SessionFork";
 import type {SessionMetadata, SessionMetadataWithThread} from "./SessionMetadata";
@@ -1214,8 +1213,18 @@ export class CodexAcpClient {
             "unknown",
         ];
         const requestedCwd = request.cwd?.trim() ?? null;
+        // For an absolute cwd, the editor's worktree history scope wants sessions
+        // from every sibling git worktree, not just this exact directory. Expand
+        // once and match a thread if its cwd equals any worktree in the repo.
+        const worktreeRoots =
+            requestedCwd && isAbsolutePathLike(requestedCwd)
+                ? gitWorktreePaths(requestedCwd)
+                : null;
         const filterByCwd = (thread: Thread): boolean => {
             if (!requestedCwd) return true;
+            if (worktreeRoots) {
+                return worktreeRoots.some((root) => arePathsEqual(thread.cwd, root));
+            }
             if (isAbsolutePathLike(requestedCwd)) {
                 return arePathsEqual(thread.cwd, requestedCwd);
             }
