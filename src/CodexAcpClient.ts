@@ -636,6 +636,10 @@ export class CodexAcpClient {
         return this.codexClient.listMcpServerStatus({});
     }
 
+    async setSessionName(sessionId: string, name: string): Promise<void> {
+        await this.codexClient.threadSetName({ threadId: sessionId, name });
+    }
+
     async listSessions(request: acp.ListSessionsRequest): Promise<acp.ListSessionsResponse> {
         const sourceKinds: ThreadSourceKind[] = [
             "cli",

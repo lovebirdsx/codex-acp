@@ -40,8 +40,11 @@ import {
     type LegacySessionModelState,
     type LegacySetSessionModelRequest,
     type LegacySetSessionModelResponse,
+    type SetSessionTitleRequest,
+    type SetSessionTitleResponse,
     isExtMethodRequest,
     LEGACY_SET_SESSION_MODEL_METHOD,
+    SET_SESSION_TITLE_METHOD,
 } from "./AcpExtensions";
 import {
     createCollabAgentToolCallUpdate,
@@ -210,6 +213,8 @@ export class CodexAcpServer {
             }
             case LEGACY_SET_SESSION_MODEL_METHOD:
                 return await this.unstable_setSessionModel(this.parseLegacySetSessionModelParams(methodRequest.params));
+            case SET_SESSION_TITLE_METHOD:
+                return await this.setSessionTitle(this.parseSetSessionTitleParams(methodRequest.params));
         }
     }
 
@@ -702,6 +707,28 @@ export class CodexAcpServer {
         return {
             sessionId: sessionId,
             modelId: modelId,
+        };
+    }
+
+    async setSessionTitle(params: SetSessionTitleRequest): Promise<SetSessionTitleResponse> {
+        const title = typeof params.title === "string" ? params.title.trim() : "";
+        if (title.length === 0) {
+            throw RequestError.invalidParams();
+        }
+        logger.log("Set session title requested", {sessionId: params.sessionId, title});
+        await this.runWithProcessCheck(() => this.codexAcpClient.setSessionName(params.sessionId, title));
+        return {};
+    }
+
+    private parseSetSessionTitleParams(params: Record<string, unknown>): SetSessionTitleRequest {
+        const sessionId = params["sessionId"];
+        const title = params["title"];
+        if (typeof sessionId !== "string" || typeof title !== "string") {
+            throw RequestError.invalidParams();
+        }
+        return {
+            sessionId: sessionId,
+            title: title,
         };
     }
 
