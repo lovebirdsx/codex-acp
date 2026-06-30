@@ -1248,6 +1248,10 @@ export class CodexAcpClient {
         return await this.codexClient.mcpOauthCompletions.await(name, threadId, signal);
     }
 
+    async setSessionName(sessionId: string, name: string): Promise<void> {
+        await this.codexClient.threadSetName({ threadId: sessionId, name });
+    }
+
     async listSessions(request: acp.ListSessionsRequest): Promise<acp.ListSessionsResponse> {
         const sourceKinds: ThreadSourceKind[] = [
             "cli",

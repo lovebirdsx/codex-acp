@@ -1,7 +1,6 @@
 #!/usr/bin/env node
 
 import * as acp from "@agentclientprotocol/sdk";
-import {z} from "zod";
 import {startCodexConnection} from "./CodexJsonRpcConnection";
 import {CodexAcpServer, type CodexProcessState} from "./CodexAcpServer";
 import {createJsonStream} from "./StdUtils";
@@ -12,43 +11,7 @@ import packageJson from "../package.json";
 import {logger} from "./Logger";
 import {runLoginCommand} from "./login";
 import {runCodexCli} from "./CodexCli";
-import {
-    GOAL_CONTROL_METHOD, LEGACY_SET_SESSION_MODEL_METHOD,
-    SESSION_STEERING_METHOD,
-} from "./AcpExtensions";
-import {ASYNC_TASK_STOP_METHOD} from "./async-tasks/AsyncTaskExtension";
-
-const emptyExtensionParamsParser = z.preprocess(
-    (params) => params ?? {},
-    z.object({}).passthrough()
-);
-
-const legacySetSessionModelParamsParser = z.object({
-    sessionId: z.string(),
-    modelId: z.string(),
-}).passthrough();
-
-const sessionSteerParamsParser = z.object({
-    sessionId: z.string(),
-    prompt: z.array(z.any()),
-}).passthrough();
-
-const goalControlParamsParser = z.discriminatedUnion("action", [
-    z.object({
-        sessionId: z.string(),
-        action: z.literal("set"),
-        objective: z.string().trim().min(1),
-    }).passthrough(),
-    z.object({
-        sessionId: z.string(),
-        action: z.enum(["pause", "resume", "clear"]),
-    }).passthrough(),
-]);
-
-const asyncTaskStopParamsParser = z.object({
-    sessionId: z.string().trim().min(1),
-    asyncTaskId: z.string().trim().min(1),
-}).passthrough();
+import {EXTENSION_METHOD_REGISTRATIONS} from "./AcpExtensions";
 
 if (process.argv.includes("--version")) {
     console.log(`${packageJson.name} ${packageJson.version}`);
@@ -136,7 +99,7 @@ function startAcpServer() {
         return codexAcpServer;
     };
 
-    acp.agent({name: packageJson.name})
+    const agentBuilder = acp.agent({name: packageJson.name})
         .onConnect((connection) => {
             const agent = createAgent(connection.client);
             codexAcpServer = agent;
@@ -162,12 +125,13 @@ function startAcpServer() {
         .onRequest(acp.methods.agent.providers.set, (ctx) => getAgent().setProvider(ctx.params))
         .onRequest(acp.methods.agent.providers.disable, (ctx) => getAgent().disableProvider(ctx.params))
         .onRequest(acp.methods.agent.session.prompt, (ctx) => getAgent().prompt(ctx.params, ctx.signal))
-        .onNotification(acp.methods.agent.session.cancel, (ctx) => getAgent().cancel(ctx.params))
-        .onRequest("authentication/status", emptyExtensionParamsParser, (ctx) => getAgent().extMethod("authentication/status", ctx.params))
-        .onRequest("authentication/logout", emptyExtensionParamsParser, (ctx) => getAgent().extMethod("authentication/logout", ctx.params))
-        .onRequest(LEGACY_SET_SESSION_MODEL_METHOD, legacySetSessionModelParamsParser, (ctx) => getAgent().extMethod(LEGACY_SET_SESSION_MODEL_METHOD, ctx.params))
-        .onRequest(SESSION_STEERING_METHOD, sessionSteerParamsParser, (ctx) => getAgent().extMethod(SESSION_STEERING_METHOD, ctx.params))
-        .onRequest(ASYNC_TASK_STOP_METHOD, asyncTaskStopParamsParser, (ctx) => getAgent().extMethod(ASYNC_TASK_STOP_METHOD, ctx.params))
-        .onRequest(GOAL_CONTROL_METHOD, goalControlParamsParser, (ctx) => getAgent().extMethod(GOAL_CONTROL_METHOD, ctx.params))
-        .connect(acpJsonStream);
+        .onNotification(acp.methods.agent.session.cancel, (ctx) => getAgent().cancel(ctx.params));
+
+    for (const {method, parser} of EXTENSION_METHOD_REGISTRATIONS) {
+        agentBuilder.onRequest(method, parser, (ctx) =>
+            getAgent().extMethod(method, ctx.params as Record<string, unknown>),
+        );
+    }
+
+    agentBuilder.connect(acpJsonStream);
 }
