@@ -34,7 +34,7 @@ describe('ACP server test', { timeout: 40_000 }, () => {
         vi.unstubAllEnvs();
     });
 
-    const ignoredFields = ["thread", "cwd", "id", "createdAt", "path", "threadId", "userAgent", "sandbox",  "conversationId", "origins", "supportedReasoningEfforts", "reasoningEffort", "model", "readOnlyAccess", "approvalsReviewer"];
+    const ignoredFields = ["thread", "cwd", "id", "createdAt", "path", "threadId", "userAgent", "sandbox",  "conversationId", "origins", "supportedReasoningEfforts", "reasoningEffort", "model", "readOnlyAccess", "approvalsReviewer", "extraRoots"];
 
     it('should throw error without authentication', async () => {
         const authFixture = createTestFixture();
@@ -475,7 +475,13 @@ describe('ACP server test', { timeout: 40_000 }, () => {
         });
 
         expect(extraRootsSetSpy).toHaveBeenCalledWith({
-            extraRoots: ["/skills/one/.agents/skills", "/skills/two/.agents/skills"],
+            extraRoots: [
+                "/skills/one/.agents/skills",
+                "/skills/two/.agents/skills",
+                "/workspace/.claude/skills",
+                "/skills/one/.claude/skills",
+                "/skills/two/.claude/skills",
+            ],
         });
         expect(extraRootsSetSpy.mock.invocationCallOrder[0]!).toBeLessThan(threadStartSpy.mock.invocationCallOrder[0]!);
         expect(listSkillsSpy).not.toHaveBeenCalled();
@@ -510,7 +516,11 @@ describe('ACP server test', { timeout: 40_000 }, () => {
 
         expect(session.additionalDirectories).toEqual(["/workspace/extra"]);
         expect(extraRootsSetSpy).toHaveBeenCalledWith({
-            extraRoots: ["/workspace/extra/.agents/skills"],
+            extraRoots: [
+                "/workspace/extra/.agents/skills",
+                "/workspace/.claude/skills",
+                "/workspace/extra/.claude/skills",
+            ],
         });
         expect(extraRootsSetSpy.mock.invocationCallOrder[0]!).toBeLessThan(threadStartSpy.mock.invocationCallOrder[0]!);
         expect(listSkillsSpy).not.toHaveBeenCalled();
@@ -1297,7 +1307,11 @@ describe('ACP server test', { timeout: 40_000 }, () => {
         });
 
         expect(extraRootsSetSpy).toHaveBeenCalledWith({
-            extraRoots: ["/workspace/extra/.agents/skills"],
+            extraRoots: [
+                "/workspace/extra/.agents/skills",
+                "/workspace/.claude/skills",
+                "/workspace/extra/.claude/skills",
+            ],
         });
         expect(listSkillsSpy).not.toHaveBeenCalledWith(expect.objectContaining({forceReload: true}));
         expect(turnStartSpy.mock.calls[0]![0].sandboxPolicy).toMatchObject({
@@ -1355,6 +1369,9 @@ describe('ACP server test', { timeout: 40_000 }, () => {
         const codexAcpAgent = fixture.getCodexAcpAgent();
 
         fixture.getCodexAppServerClient().listSkills = vi.fn().mockResolvedValue({ data: [] });
+        // fork: the prompt path now lists cwd/.claude/skills alongside .agents/skills,
+        // so a prompt on a client that never ran newSession still refreshes the roots.
+        fixture.getCodexAppServerClient().skillsExtraRootsSet = vi.fn().mockResolvedValue(undefined);
         fixture.getCodexAppServerClient().turnStart = vi.fn().mockResolvedValue({
             turn: { id: "turn-id", items: [], status: "inProgress", error: null }
         });
