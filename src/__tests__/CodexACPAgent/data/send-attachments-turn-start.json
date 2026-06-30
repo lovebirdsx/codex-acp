@@ -1,5 +1,15 @@
 {
   "eventType": "request",
+  "method": "skills/extraRoots/set",
+  "params": {
+    "extraRoots": "extraRoots"
+  }
+}
+{
+  "eventType": "response"
+}
+{
+  "eventType": "request",
   "method": "skills/list",
   "params": {
     "cwds": [
