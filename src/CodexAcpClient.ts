@@ -20,6 +20,7 @@ import type {JsonValue} from "./app-server/serde_json/JsonValue";
 import {ModelId} from "./ModelId";
 import {AgentMode} from "./AgentMode";
 import path from "node:path";
+import fs from "node:fs";
 import {arePathsEqual, gitWorktreePaths} from "./PathUtils";
 import {logger} from "./Logger";
 import {sanitizeMcpServerName} from "./McpServerName";
@@ -228,6 +229,7 @@ export class CodexAcpClient {
 
         const response = await this.codexClient.threadResume({
             config: await this.createSessionConfig(request.cwd, additionalDirectories, request.mcpServers ?? []),
+            ...this.buildMemoryInstructions(request.cwd),
             cwd: request.cwd,
             modelProvider: this.getResumeModelProvider(),
             threadId: request.sessionId,
@@ -250,6 +252,7 @@ export class CodexAcpClient {
 
         const response = await this.codexClient.threadResume({
             config: await this.createSessionConfig(request.cwd, additionalDirectories, request.mcpServers ?? []),
+            ...this.buildMemoryInstructions(request.cwd),
             cwd: request.cwd,
             modelProvider: this.getResumeModelProvider(),
             threadId: request.sessionId,
@@ -277,6 +280,7 @@ export class CodexAcpClient {
 
         const response = await this.codexClient.threadStart({
             config: await this.createSessionConfig(request.cwd, additionalDirectories, request.mcpServers),
+            ...this.buildMemoryInstructions(request.cwd),
             modelProvider: this.getModelProvider(),
             cwd: request.cwd,
         });
@@ -387,6 +391,37 @@ export class CodexAcpClient {
         return this.getModelProvider() ?? "openai";
     }
 
+    // fork-only: surface claude's project memory to codex. Claude auto-loads the
+    // MEMORY.md index every turn via its native memory tool; codex has none, so we
+    // read cwd/.claude/memory/MEMORY.md and pass it as developerInstructions (an
+    // additive layer, never baseInstructions which would replace codex's own system
+    // prompt). codex can then read individual .claude/memory/<slug>.md on demand with
+    // its file tools. Missing/unreadable index -> inject nothing.
+    private buildMemoryInstructions(cwd: string): { developerInstructions?: string } {
+        if (!cwd) {
+            return {};
+        }
+        let index: string;
+        try {
+            index = fs.readFileSync(path.join(cwd, ".claude", "memory", "MEMORY.md"), "utf8");
+        } catch {
+            return {};
+        }
+        if (index.trim().length === 0) {
+            return {};
+        }
+        const developerInstructions = [
+            "<project-memory>",
+            "The following is this project's long-term memory index (.claude/memory/MEMORY.md).",
+            "Treat it like always-on background context. When an entry is relevant, read the",
+            "referenced file under .claude/memory/ with your file tools before acting.",
+            "",
+            index.trim(),
+            "</project-memory>",
+        ].join("\n");
+        return { developerInstructions };
+    }
+
     private async refreshSkills(
         cwd: string,
         additionalRoots: string[]
@@ -395,7 +430,16 @@ export class CodexAcpClient {
             return;
         }
 
-        const skillExtraRoots = additionalRoots.map(root => path.join(root, ".agents", "skills"));
+        // fork-only: expose claude's ".claude/skills" alongside codex's native
+        // ".agents/skills" so one SKILL.md set serves both agents. cwd/.claude/skills
+        // is listed explicitly because codex auto-scans .agents/skills under cwd but
+        // never .claude/skills. Kept symmetric with the .agents/skills handling above
+        // (no existence check) to keep the upstream diff minimal.
+        const skillExtraRoots = [
+            ...additionalRoots.map(root => path.join(root, ".agents", "skills")),
+            path.join(cwd, ".claude", "skills"),
+            ...additionalRoots.map(root => path.join(root, ".claude", "skills")),
+        ];
         if (!arraysEqual(this.skillExtraRoots, skillExtraRoots)) {
             await this.codexClient.skillsExtraRootsSet({ extraRoots: skillExtraRoots });
             this.skillExtraRoots = skillExtraRoots;

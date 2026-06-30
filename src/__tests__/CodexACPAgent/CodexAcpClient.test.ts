@@ -29,7 +29,7 @@ describe('ACP server test', { timeout: 40_000 }, () => {
         vi.unstubAllEnvs();
     });
 
-    const ignoredFields = ["thread", "cwd", "id", "createdAt", "path", "threadId", "userAgent", "sandbox",  "conversationId", "origins", "supportedReasoningEfforts", "reasoningEffort", "model", "readOnlyAccess", "approvalsReviewer"];
+    const ignoredFields = ["thread", "cwd", "id", "createdAt", "path", "threadId", "userAgent", "sandbox",  "conversationId", "origins", "supportedReasoningEfforts", "reasoningEffort", "model", "readOnlyAccess", "approvalsReviewer", "extraRoots"];
 
     it('should throw error without authentication', async () => {
         const authFixture = createTestFixture();
@@ -369,7 +369,11 @@ describe('ACP server test', { timeout: 40_000 }, () => {
 
         expect(session.additionalDirectories).toEqual(["/workspace/extra"]);
         expect(extraRootsSetSpy).toHaveBeenCalledWith({
-            extraRoots: ["/workspace/extra/.agents/skills"],
+            extraRoots: [
+                "/workspace/extra/.agents/skills",
+                "/workspace/.claude/skills",
+                "/workspace/extra/.claude/skills",
+            ],
         });
         expect(listSkillsSpy).toHaveBeenCalledWith({
             cwds: ["/workspace", "/workspace/extra"],
@@ -666,7 +670,11 @@ describe('ACP server test', { timeout: 40_000 }, () => {
         });
 
         expect(extraRootsSetSpy).toHaveBeenCalledWith({
-            extraRoots: ["/workspace/extra/.agents/skills"],
+            extraRoots: [
+                "/workspace/extra/.agents/skills",
+                "/workspace/.claude/skills",
+                "/workspace/extra/.claude/skills",
+            ],
         });
         expect(listSkillsSpy).toHaveBeenCalledWith({
             cwds: ["/workspace", "/workspace/extra"],
