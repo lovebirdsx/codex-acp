@@ -76,6 +76,26 @@ describe("ResponseItemHistoryFallback", () => {
             { toolCallId: "call-read-ok", status: "completed" },
         ]);
     });
+
+    it("treats shell_command function calls as executable terminal commands", () => {
+        const updates = parseResponseItemHistoryFallback(jsonl([
+            shellCommandCall("call-shell", "echo hi"),
+            functionCallOutput("call-shell", "hi\nProcess exited with code 0\n"),
+        ]), "terminal_output");
+
+        expect(toolCallKinds(updates)).toEqual([{ toolCallId: "call-shell", kind: "execute" }]);
+        expect(toolCallTitles(updates)).toEqual([{ toolCallId: "call-shell", title: "echo hi" }]);
+        expect(toolCallUsesTerminal(updates, "call-shell")).toBe(true);
+    });
+
+    it("classifies shell_command read commands via command action inference", () => {
+        const updates = parseResponseItemHistoryFallback(jsonl([
+            shellCommandCall("call-read", "cat README.md"),
+            functionCallOutput("call-read", "contents\n"),
+        ]), "terminal_output");
+
+        expect(toolCallKinds(updates)).toEqual([{ toolCallId: "call-read", kind: "read" }]);
+    });
 });
 
 function jsonl(records: unknown[]): string {
@@ -92,6 +112,22 @@ function functionCall(callId: string, cmd: string): unknown {
                 cmd,
                 workdir: "/workspace",
                 yield_time_ms: 1000,
+            }),
+            call_id: callId,
+        },
+    };
+}
+
+function shellCommandCall(callId: string, command: string): unknown {
+    return {
+        type: "response_item",
+        payload: {
+            type: "function_call",
+            name: "shell_command",
+            arguments: JSON.stringify({
+                command,
+                workdir: "/workspace",
+                timeout_ms: 10000,
             }),
             call_id: callId,
         },
@@ -132,4 +168,35 @@ function thoughtTexts(updates: UpdateSessionEvent[] | null): string[] {
             update.sessionUpdate === "agent_thought_chunk"
         ))
         .flatMap((update) => update.content.type === "text" ? [update.content.text] : []);
+}
+
+type ToolCallStart = Extract<UpdateSessionEvent, { sessionUpdate: "tool_call" }>;
+
+function toolCallStarts(updates: UpdateSessionEvent[] | null): ToolCallStart[] {
+    return (updates ?? []).filter(
+        (update): update is ToolCallStart => update.sessionUpdate === "tool_call",
+    );
+}
+
+function toolCallKinds(
+    updates: UpdateSessionEvent[] | null,
+): Array<{ toolCallId: string; kind: ToolCallStart["kind"] }> {
+    return toolCallStarts(updates).map((update) => ({
+        toolCallId: update.toolCallId,
+        kind: update.kind,
+    }));
+}
+
+function toolCallTitles(
+    updates: UpdateSessionEvent[] | null,
+): Array<{ toolCallId: string; title: string }> {
+    return toolCallStarts(updates).map((update) => ({
+        toolCallId: update.toolCallId,
+        title: update.title,
+    }));
+}
+
+function toolCallUsesTerminal(updates: UpdateSessionEvent[] | null, toolCallId: string): boolean {
+    const start = toolCallStarts(updates).find((update) => update.toolCallId === toolCallId);
+    return (start?.content ?? []).some((content) => content.type === "terminal");
 }

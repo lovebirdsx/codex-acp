@@ -22,6 +22,12 @@ type ParsedShellCommand = {
     tokens: string[];
 };
 
+const EXEC_COMMAND_NAMES = new Set(["exec_command", "shell_command"]);
+
+function isExecCommandName(name: string): boolean {
+    return EXEC_COMMAND_NAMES.has(name);
+}
+
 function historyFallbackUpdateKey(update: UpdateSessionEvent): string | null {
     switch (update.sessionUpdate) {
         case "user_message_chunk":
@@ -367,7 +373,7 @@ function createFunctionCallUpdate(item: JsonRecord): LegacyFunctionCallUpdate | 
         return null;
     }
 
-    const isExecCommand = name === "exec_command";
+    const isExecCommand = isExecCommandName(name);
     const args = parseFunctionArguments(item["arguments"]);
     const command = isExecCommand ? commandFromFunctionArguments(args) : null;
     const cwd = isExecCommand ? cwdFromFunctionArguments(args) : "";
@@ -459,7 +465,7 @@ function parseFunctionArguments(value: unknown): unknown {
 }
 
 function rawInputForFunctionCall(name: string, args: unknown): unknown {
-    if (name === "exec_command") {
+    if (isExecCommandName(name)) {
         const record = asRecord(args);
         if (record) {
             return {
@@ -477,7 +483,7 @@ function rawInputForFunctionCall(name: string, args: unknown): unknown {
 }
 
 function titleForFunctionCall(name: string, args: unknown): string {
-    if (name === "exec_command") {
+    if (isExecCommandName(name)) {
         const command = commandFromFunctionArguments(args);
         return command ? stripShellPrefix(command) : "Run command";
     }
@@ -498,8 +504,10 @@ function titleForFunctionCall(name: string, args: unknown): string {
 }
 
 function toolKindForFunctionCall(name: string): AcpToolKind {
+    if (isExecCommandName(name)) {
+        return "execute";
+    }
     switch (name) {
-        case "exec_command":
         case "multi_tool_use.parallel":
             return "execute";
         case "apply_patch":
@@ -512,7 +520,8 @@ function toolKindForFunctionCall(name: string): AcpToolKind {
 }
 
 function functionCallUsesTerminal(item: JsonRecord): boolean {
-    return item["name"] === "exec_command";
+    const name = stringValue(item["name"]);
+    return name !== null && isExecCommandName(name);
 }
 
 function commandFromFunctionArguments(args: unknown): string | null {
