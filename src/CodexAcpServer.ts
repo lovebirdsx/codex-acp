@@ -91,6 +91,9 @@ import {
     SET_SESSION_TITLE_METHOD,
     type SetSessionTitleRequest,
     type SetSessionTitleResponse,
+    type RewindSessionRequest,
+    type RewindSessionResponse,
+    REWIND_SESSION_METHOD,
 } from "./AcpExtensions";
 import {AcpToolCallRenderer} from "./tool-calls/AcpToolCallRenderer";
 import {ClientCapabilities} from "./tool-calls/ClientCapabilities";
@@ -584,6 +587,8 @@ export class CodexAcpServer {
             }
             case SET_SESSION_TITLE_METHOD:
                 return await this.setSessionTitle(this.parseSetSessionTitleParams(methodRequest.params));
+            case REWIND_SESSION_METHOD:
+                return await this.rewindSession(methodRequest.params);
         }
     }
 
@@ -2028,6 +2033,40 @@ export class CodexAcpServer {
         };
     }
 
+    /**
+     * Rewind (回退) the conversation to just before a user message. Backed by the
+     * app-server's `thread/revert` (which truncates + persists history but does
+     * NOT touch files — the editor's change tracker handles file rollback). On a
+     * real (non-dryRun) call we stream the truncated history back as session
+     * updates: the renderer has reset its timeline and is replaying, so it
+     * rebuilds cleanly. The response reports only `canRewind`; file impact stats
+     * are computed editor-side since codex can't roll files back.
+     */
+    async rewindSession(params: RewindSessionRequest): Promise<RewindSessionResponse> {
+        const {sessionId, messageId, dryRun} = params;
+        logger.log("Rewind session requested", {sessionId, messageId, dryRun});
+        // Verify the session is live so replay targets a subscribed thread.
+        this.getSessionState(sessionId);
+
+        if (dryRun === true) {
+            const preview = await this.runWithProcessCheck(() =>
+                this.codexAcpClient.readThread(sessionId),
+            );
+            return {canRewind: this.codexAcpClient.canRollbackTo(preview, messageId)};
+        }
+
+        const truncated = await this.runWithProcessCheck(() =>
+            this.codexAcpClient.rollbackSession(sessionId, messageId),
+        );
+        if (truncated === undefined) {
+            logger.log("Rewind found no matching anchor", {sessionId, messageId});
+            return {canRewind: false};
+        }
+        await this.streamThreadHistory(sessionId, truncated.thread, truncated.history);
+        logger.log("Rewind persisted", {sessionId, messageId});
+        return {canRewind: true};
+    }
+
     private createSessionConfigOptions(sessionState: SessionState): Array<acp.SessionConfigOption> {
         const currentModelId = ModelId.fromString(sessionState.currentModelId);
         const useRecommendedValue = clientSupportsAirCapability(
@@ -2609,7 +2648,11 @@ export class CodexAcpServer {
 
     private createUserMessageUpdates(item: ThreadItem & { type: "userMessage" }): UpdateSessionEvent[] {
         const updates: UpdateSessionEvent[] = [];
-        const messageId = item.id;
+        // Prefer the client-supplied anchor so replayed history carries the same
+        // messageId the editor stamped on the original prompt — rewind/fork
+        // buttons key off it. Fall back to the item id for older threads that
+        // predate clientId capture.
+        const messageId = item.clientId ?? item.id;
         const contentBlocks = item.content.map(input => this.userInputToContentBlocks(input));
         const attachmentUris = new Set(contentBlocks.flatMap((blocks, index) =>
             item.content[index]?.type === "text"

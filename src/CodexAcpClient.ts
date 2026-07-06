@@ -743,6 +743,50 @@ export class CodexAcpClient {
         return null;
     }
 
+    /**
+     * Rollback (回退) a thread to just before the user message anchored by
+     * `messageId`. codex's `thread/revert` only truncates history (and persists
+     * it); file changes are the client's responsibility. Returns the truncated
+     * thread plus its persisted history so the caller can replay it.
+     */
+    async rollbackSession(
+        sessionId: string,
+        messageId: string,
+    ): Promise<{thread: Thread; history: AsyncIterable<ThreadItem[]>} | undefined> {
+        const current = await this.codexClient.threadRead({
+            threadId: sessionId,
+            includeTurns: true,
+        });
+        const numTurns = resolveRollbackTurns(current.thread, messageId);
+        if (numTurns === undefined || numTurns < 1) return undefined;
+        const beforeTurn = current.thread.turns[current.thread.turns.length - numTurns];
+        if (beforeTurn === undefined) return undefined;
+        const reverted = await this.codexClient.threadRevert({
+            threadId: sessionId,
+            beforeTurnId: beforeTurn.id,
+        });
+        return {
+            thread: {...reverted.thread, turns: []},
+            history: reverted.itemsBackwardsCursor !== null
+                ? this.codexClient.threadItemPages(reverted.thread.id, {lastItemCursor: reverted.itemsBackwardsCursor})
+                : noItems(),
+        };
+    }
+
+    /** Read a thread with its full turn history (used for rewind dry-run previews). */
+    async readThread(sessionId: string): Promise<Thread> {
+        const response = await this.codexClient.threadRead({
+            threadId: sessionId,
+            includeTurns: true,
+        });
+        return response.thread;
+    }
+
+    /** Whether `messageId` anchors a user turn that rewind/fork can target. */
+    canRollbackTo(thread: Thread, messageId: string): boolean {
+        return resolveRollbackTurns(thread, messageId) !== undefined;
+    }
+
     async newSession(request: acp.NewSessionRequest): Promise<SessionMetadata> {
         const additionalDirectories = readAdditionalDirectories(request.cwd, request.additionalDirectories, request._meta);
         await this.refreshSkills(request.cwd, additionalDirectories);
@@ -1146,9 +1190,14 @@ export class CodexAcpClient {
         if (shouldCancel?.()) {
             return null;
         }
+        // Client-supplied anchor for this user turn so rewind/fork can later
+        // target it. The editor stamps it on `_meta.messageId`; app-server
+        // persists it as the resulting `userMessage` item's `clientId`.
+        const clientUserMessageId = readClientUserMessageId(request);
         return await this.codexClient.runTurn({
             threadId: request.sessionId,
             input: input,
+            ...(clientUserMessageId !== undefined ? {clientUserMessageId} : {}),
             approvalPolicy: agentMode.approvalPolicy,
             approvalsReviewer: agentMode.approvalsReviewer,
             sandboxPolicy: addAdditionalDirectoriesToSandboxPolicy(agentMode.sandboxPolicy, additionalDirectories),
@@ -1346,6 +1395,39 @@ export class CodexAcpClient {
 }
 
 export type JsonObject = { [key in string]?: JsonValue }
+
+function readClientUserMessageId(request: acp.PromptRequest): string | undefined {
+    const meta = request._meta as {messageId?: unknown} | null | undefined;
+    const fromMeta = meta?.messageId;
+    if (typeof fromMeta === "string" && fromMeta.length > 0) return fromMeta;
+    // Spec-compliant clients may also send it top-level; tolerate either.
+    const topLevel = (request as {messageId?: unknown}).messageId;
+    if (typeof topLevel === "string" && topLevel.length > 0) return topLevel;
+    return undefined;
+}
+
+/**
+ * Translate a client-anchored user messageId into the number of turns to drop
+ * from the end so history rewinds to *before* that message — `thread/revert`
+ * then takes the id of that anchor turn as `beforeTurnId`.
+ * Matches the user turn whose `clientId` (preferred) or `id` equals `messageId`;
+ * returns undefined when the anchor can't be found (older threads / bad id).
+ * Exported for unit tests.
+ */
+export function resolveRollbackTurns(thread: Thread, messageId: string): number | undefined {
+    const turns = thread.turns;
+    for (let i = 0; i < turns.length; i++) {
+        const turn = turns[i];
+        if (turn === undefined) continue;
+        const matches = turn.items.some(
+            (item) =>
+                item.type === "userMessage" &&
+                (item.clientId === messageId || item.id === messageId),
+        );
+        if (matches) return turns.length - i;
+    }
+    return undefined;
+}
 
 function buildPromptItems(prompt: acp.ContentBlock[]): UserInput[] {
     return prompt.map((block): UserInput | null => {

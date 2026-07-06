@@ -64,13 +64,13 @@ import type {
     Turn,
     ThreadResumeParams,
     ThreadResumeResponse,
+    ThreadRevertParams,
+    ThreadRevertResponse,
     ThreadSettings,
     ThreadSetNameParams,
     ThreadSetNameResponse,
     ThreadStartParams,
     ThreadStartResponse,
-    ThreadSetNameParams,
-    ThreadSetNameResponse,
     ThreadUnsubscribeParams,
     ThreadUnsubscribeResponse,
     ToolRequestUserInputParams,
@@ -613,8 +613,8 @@ export class CodexAppServerClient {
         await this.connection.sendRequest("thread/settings/update", params);
     }
 
-    async threadSetName(params: ThreadSetNameParams): Promise<ThreadSetNameResponse> {
-        return await this.sendRequest({ method: "thread/name/set", params: params });
+    async threadRevert(params: ThreadRevertParams): Promise<ThreadRevertResponse> {
+        return await this.sendRequest({ method: "thread/revert", params: params });
     }
 
     async threadList(params: ThreadListParams): Promise<ThreadListResponse> {
@@ -785,10 +785,6 @@ export class CodexAppServerClient {
 
     async accountRead(params: GetAccountParams): Promise<GetAccountResponse> {
         return await this.sendRequest({ method: "account/read", params: params });
-    }
-
-    async accountRateLimitsRead(): Promise<GetAccountRateLimitsResponse> {
-        return await this.sendRequest({ method: "account/rateLimits/read", params: undefined });
     }
 
     //TODO create type-safe helper

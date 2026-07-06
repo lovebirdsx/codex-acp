@@ -54,6 +54,18 @@ export const SESSION_STEERING_METHOD = "_session/steering";
  */
 export const SET_SESSION_TITLE_METHOD = "universe-editor/set_session_title";
 
+/**
+ * Custom ACP request that rewinds a session to a specific user message (回退):
+ * truncates the conversation history past it. Shared verbatim with the editor
+ * renderer's `acpSessionModel.ts` (`REWIND_SESSION_METHOD`) — keep both in sync.
+ * codex backs it with the app-server's `thread/revert`, which only truncates
+ * history (and persists it); file changes are the client's responsibility, so
+ * this method does NOT roll back files (unlike the claude fork's variant).
+ * Params: `{ sessionId, messageId, dryRun? }`; the response is shaped like the
+ * claude fork's RewindFilesResult so the renderer can treat both uniformly.
+ */
+export const REWIND_SESSION_METHOD = "universe-editor/rewind_session";
+
 export type LegacySessionModel = {
     modelId: string;
     name: string;
@@ -79,6 +91,21 @@ export type SetSessionTitleRequest = {
 
 export type SetSessionTitleResponse = {}
 
+export type RewindSessionRequest = {
+    sessionId: SessionId;
+    messageId: string;
+    dryRun?: boolean;
+}
+
+/** Mirrors the claude fork's RewindFilesResult so the renderer treats both agents uniformly. */
+export type RewindSessionResponse = {
+    canRewind: boolean;
+    error?: string;
+    filesChanged?: ReadonlyArray<string>;
+    insertions?: number;
+    deletions?: number;
+}
+
 export type LegacyNewSessionResponse = NewSessionResponse & {
     models?: LegacySessionModelState | null;
 }
@@ -99,6 +126,7 @@ export type ExtMethodRequest =
     | GoalControlExtRequest
     | AsyncTaskStopExtRequest
     | SetSessionTitleExtRequest
+    | RewindSessionExtRequest
 
 export function isExtMethodRequest(request: { method: string, params: Record<string, unknown> }): request is ExtMethodRequest {
     return request.method === "authentication/status"
@@ -108,7 +136,8 @@ export function isExtMethodRequest(request: { method: string, params: Record<str
         || request.method === LEGACY_GOAL_CONTROL_METHOD
         || request.method === SESSION_STEERING_METHOD
         || request.method === ASYNC_TASK_STOP_METHOD
-        || request.method === SET_SESSION_TITLE_METHOD;
+        || request.method === SET_SESSION_TITLE_METHOD
+        || request.method === REWIND_SESSION_METHOD;
 }
 
 /**
@@ -136,6 +165,11 @@ export type GoalControlExtRequest = {
 export type SetSessionTitleExtRequest = {
     method: typeof SET_SESSION_TITLE_METHOD;
     params: SetSessionTitleRequest;
+}
+
+export type RewindSessionExtRequest = {
+    method: typeof REWIND_SESSION_METHOD;
+    params: RewindSessionRequest;
 }
 
 export async function legacySetSessionModel(
@@ -211,6 +245,12 @@ export const asyncTaskStopParamsParser = z.object({
     asyncTaskId: z.string().trim().min(1),
 }).passthrough();
 
+export const rewindSessionParamsParser = z.object({
+    sessionId: z.string(),
+    messageId: z.string(),
+    dryRun: z.boolean().optional(),
+}).passthrough();
+
 export interface ExtensionMethodRegistration {
     readonly method: string;
     readonly parser: z.ZodType;
@@ -224,4 +264,5 @@ export const EXTENSION_METHOD_REGISTRATIONS: ReadonlyArray<ExtensionMethodRegist
     {method: SESSION_STEERING_METHOD, parser: sessionSteerParamsParser},
     {method: GOAL_CONTROL_METHOD, parser: goalControlParamsParser},
     {method: ASYNC_TASK_STOP_METHOD, parser: asyncTaskStopParamsParser},
+    {method: REWIND_SESSION_METHOD, parser: rewindSessionParamsParser},
 ];

@@ -27,7 +27,9 @@ export async function forkSession(
     dependencies: SessionForkDependencies,
 ): Promise<SessionMetadata> {
     await dependencies.refreshSkills(request.cwd, additionalDirectories);
-    const lastTurnId = await resolveForkTurnId(request, dependencies.codexClient);
+    // fork-only: `_meta.rewindTo` (the editor's 回退/fork anchor) wins over the AIR fork point.
+    const rewind = await resolveRewindForkPoint(request, dependencies.codexClient);
+    const lastTurnId = rewind.lastTurnId ?? await resolveForkTurnId(request, dependencies.codexClient);
     const response = await dependencies.codexClient.threadFork({
         excludeTurns: true,
         config: await dependencies.createSessionConfig(
@@ -41,6 +43,12 @@ export async function forkSession(
         threadId: request.sessionId,
     });
     await dependencies.codexClient.threadUnsubscribe({threadId: response.thread.id});
+    if (rewind.beforeTurnId !== undefined) {
+        await dependencies.codexClient.threadRevert({
+            threadId: response.thread.id,
+            beforeTurnId: rewind.beforeTurnId,
+        });
+    }
 
     const models = await dependencies.fetchAvailableModels();
     return {
@@ -52,6 +60,38 @@ export async function forkSession(
         currentServiceTier: response.serviceTier as ServiceTier ?? null,
         additionalDirectories,
     };
+}
+
+/**
+ * fork-only: the editor asks to branch from before one of the session's user
+ * messages via `_meta.rewindTo` (parity with its 回退 action). Translate that
+ * anchor into codex's fork knobs: the turn just before the anchor turn becomes
+ * `lastTurnId`; an anchor in the first turn means the fork keeps no turns, which
+ * codex cannot express as a fork point, so the forked thread is reverted to
+ * before that first turn instead. An anchor that is not found forks from the
+ * tip, like an absent id.
+ */
+async function resolveRewindForkPoint(
+    request: acp.ForkSessionRequest,
+    codexClient: CodexAppServerClient,
+): Promise<{ lastTurnId?: string; beforeTurnId?: string }> {
+    const messageId = readForkRewindTo(request);
+    if (messageId === undefined) return {};
+    const history = await codexClient.threadReadWithHistory(request.sessionId);
+    const turns = history.thread.turns;
+    const index = turns.findIndex(turn => turn.items.some(item =>
+        item.type === "userMessage" && (item.clientId === messageId || item.id === messageId)));
+    if (index < 0) return {};
+    const anchor = turns[index];
+    if (index === 0) return anchor === undefined ? {} : {beforeTurnId: anchor.id};
+    const previous = turns[index - 1];
+    return previous === undefined ? {} : {lastTurnId: previous.id};
+}
+
+function readForkRewindTo(request: acp.ForkSessionRequest): string | undefined {
+    const meta = request._meta as {rewindTo?: unknown} | null | undefined;
+    const rewindTo = meta?.rewindTo;
+    return typeof rewindTo === "string" && rewindTo.length > 0 ? rewindTo : undefined;
 }
 
 async function resolveForkTurnId(
