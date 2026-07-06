@@ -383,8 +383,85 @@ export class CodexAcpClient {
         };
     }
 
-    async newSession(request: acp.NewSessionRequest): Promise<SessionMetadata> {
+    /**
+     * Fork a thread into a fresh independent one. codex's `thread/fork` copies
+     * the whole thread; when the editor asks (via `_meta.rewindTo`) to branch
+     * from before a specific user message, we then `thread/rollback` the new
+     * thread down to that anchor. Returns the new threadId as the ACP sessionId.
+     */
+    async forkSession(request: acp.ForkSessionRequest): Promise<SessionMetadata> {
         const additionalDirectories = readAdditionalDirectories(request.cwd, request.additionalDirectories, request._meta);
+        await this.refreshSkills(request.cwd, additionalDirectories);
+
+        const response = await this.codexClient.threadFork({
+            threadId: request.sessionId,
+            config: await this.createSessionConfig(request.cwd, additionalDirectories, request.mcpServers ?? []),
+            ...this.buildMemoryInstructions(request.cwd),
+            cwd: request.cwd,
+            modelProvider: await this.getResumeModelProvider(),
+        });
+
+        const rewindTo = readForkRewindTo(request);
+        let thread = response.thread;
+        if (rewindTo !== undefined) {
+            const numTurns = resolveRollbackTurns(thread, rewindTo);
+            if (numTurns !== undefined && numTurns >= 1) {
+                const rolled = await this.codexClient.threadRollback({
+                    threadId: thread.id,
+                    numTurns,
+                });
+                thread = rolled.thread;
+            }
+        }
+
+        const codexModels = await this.fetchAvailableModels();
+        const currentModelId = this.createModelId(codexModels, response.model, response.reasoningEffort).toString();
+        return {
+            sessionId: thread.id,
+            currentModelId: currentModelId,
+            models: codexModels,
+            modelProvider: response.modelProvider,
+            currentServiceTier: response.serviceTier as ServiceTier ?? null,
+            collaborationMode: this.getCollaborationMode(thread.id),
+            additionalDirectories,
+        };
+    }
+
+    /**
+     * Rollback (回退) a thread to just before the user message anchored by
+     * `messageId`. codex's `thread/rollback` only truncates history (and persists
+     * it); file changes are the client's responsibility. Returns the truncated
+     * thread so the caller can replay the shortened history.
+     */
+    async rollbackSession(sessionId: string, messageId: string): Promise<Thread | undefined> {
+        const current = await this.codexClient.threadRead({
+            threadId: sessionId,
+            includeTurns: true,
+        });
+        const numTurns = resolveRollbackTurns(current.thread, messageId);
+        if (numTurns === undefined || numTurns < 1) return undefined;
+        const rolled = await this.codexClient.threadRollback({
+            threadId: sessionId,
+            numTurns,
+        });
+        return rolled.thread;
+    }
+
+    /** Read a thread with its full turn history (used for rewind dry-run previews). */
+    async readThread(sessionId: string): Promise<Thread> {
+        const response = await this.codexClient.threadRead({
+            threadId: sessionId,
+            includeTurns: true,
+        });
+        return response.thread;
+    }
+
+    /** Whether `messageId` anchors a user turn that rewind/fork can target. */
+    canRollbackTo(thread: Thread, messageId: string): boolean {
+        return resolveRollbackTurns(thread, messageId) !== undefined;
+    }
+
+    async newSession(request: acp.NewSessionRequest): Promise<SessionMetadata> {        const additionalDirectories = readAdditionalDirectories(request.cwd, request.additionalDirectories, request._meta);
         await this.refreshSkills(request.cwd, additionalDirectories);
 
         const response = await this.codexClient.threadStart({
@@ -745,9 +822,14 @@ export class CodexAcpClient {
         if (shouldCancel?.()) {
             return null;
         }
+        // Client-supplied anchor for this user turn so rewind/fork can later
+        // target it. The editor stamps it on `_meta.messageId`; app-server
+        // persists it as the resulting `userMessage` item's `clientId`.
+        const clientUserMessageId = readClientUserMessageId(request);
         return await this.codexClient.runTurn({
             threadId: request.sessionId,
             input: input,
+            ...(clientUserMessageId !== undefined ? {clientUserMessageId} : {}),
             approvalPolicy: agentMode.approvalPolicy,
             sandboxPolicy: addAdditionalDirectoriesToSandboxPolicy(agentMode.sandboxPolicy, additionalDirectories),
             summary: disableSummary ? "none" : "auto",
@@ -963,8 +1045,45 @@ export type SessionMetadataWithThread = SessionMetadata & {
     thread: Thread,
 }
 
-function buildPromptItems(prompt: acp.ContentBlock[]): UserInput[] {
-    return prompt.map((block): UserInput | null => {
+function readClientUserMessageId(request: acp.PromptRequest): string | undefined {
+    const meta = request._meta as {messageId?: unknown} | null | undefined;
+    const fromMeta = meta?.messageId;
+    if (typeof fromMeta === "string" && fromMeta.length > 0) return fromMeta;
+    // Spec-compliant clients may also send it top-level; tolerate either.
+    const topLevel = (request as {messageId?: unknown}).messageId;
+    if (typeof topLevel === "string" && topLevel.length > 0) return topLevel;
+    return undefined;
+}
+
+function readForkRewindTo(request: acp.ForkSessionRequest): string | undefined {
+    const meta = request._meta as {rewindTo?: unknown} | null | undefined;
+    const rewindTo = meta?.rewindTo;
+    return typeof rewindTo === "string" && rewindTo.length > 0 ? rewindTo : undefined;
+}
+
+/**
+ * Translate a client-anchored user messageId into codex's `numTurns`
+ * (turns to drop from the end so history rewinds to *before* that message).
+ * Matches the user turn whose `clientId` (preferred) or `id` equals `messageId`;
+ * returns undefined when the anchor can't be found (older threads / bad id).
+ * Exported for unit tests.
+ */
+export function resolveRollbackTurns(thread: Thread, messageId: string): number | undefined {
+    const turns = thread.turns;
+    for (let i = 0; i < turns.length; i++) {
+        const turn = turns[i];
+        if (turn === undefined) continue;
+        const matches = turn.items.some(
+            (item) =>
+                item.type === "userMessage" &&
+                (item.clientId === messageId || item.id === messageId),
+        );
+        if (matches) return turns.length - i;
+    }
+    return undefined;
+}
+
+function buildPromptItems(prompt: acp.ContentBlock[]): UserInput[] {    return prompt.map((block): UserInput | null => {
         switch (block.type) {
             case "text":
                 return {type: "text", text: block.text, text_elements: []};

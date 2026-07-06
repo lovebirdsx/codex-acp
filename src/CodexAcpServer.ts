@@ -53,11 +53,14 @@ import {
     type SessionSteeringResponse,
     type SetSessionTitleRequest,
     type SetSessionTitleResponse,
+    type RewindSessionRequest,
+    type RewindSessionResponse,
     GOAL_CONTROL_METHOD,
     isExtMethodRequest,
     LEGACY_SET_SESSION_MODEL_METHOD,
     SESSION_STEERING_METHOD,
     SET_SESSION_TITLE_METHOD,
+    REWIND_SESSION_METHOD,
 } from "./AcpExtensions";
 import {
     createCollabAgentToolCallUpdate,
@@ -244,6 +247,7 @@ export class CodexAcpServer {
                     list: { },
                     close: { },
                     delete: { },
+                    fork: { },
                     additionalDirectories: {},
                 },
                 mcpCapabilities: {
@@ -298,6 +302,8 @@ export class CodexAcpServer {
             }
             case SET_SESSION_TITLE_METHOD:
                 return await this.setSessionTitle(this.parseSetSessionTitleParams(methodRequest.params));
+            case REWIND_SESSION_METHOD:
+                return await this.rewindSession(methodRequest.params);
         }
     }
 
@@ -680,10 +686,27 @@ export class CodexAcpServer {
         };
     }
 
+    /**
+     * Fork (分叉) a session into a fresh, independent one. The source is left
+     * untouched. When the editor supplies `_meta.rewindTo` (a user messageId),
+     * the fork is truncated to just before that message. The editor then calls
+     * `session/load` on the returned id to replay the (truncated) history — this
+     * method only produces the new thread and returns its id.
+     */
+    async unstable_forkSession(params: acp.ForkSessionRequest): Promise<acp.ForkSessionResponse> {
+        logger.log("Forking session...", {
+            sessionId: params.sessionId,
+            rewindTo: (params._meta as {rewindTo?: unknown} | null | undefined)?.rewindTo,
+        });
+        await this.checkAuthorization();
+        const metadata = await this.runWithProcessCheck(() => this.codexAcpClient.forkSession(params));
+        logger.log("Session forked", {from: params.sessionId, to: metadata.sessionId});
+        return {sessionId: metadata.sessionId};
+    }
+
     async authenticate(
         _params: acp.AuthenticateRequest,
-    ): Promise<acp.AuthenticateResponse> {
-        logger.log("Authenticate request received");
+    ): Promise<acp.AuthenticateResponse> {        logger.log("Authenticate request received");
         const isAuthenticated = await this.runWithProcessCheck(() => this.codexAcpClient.authenticate(_params));
         if (!isAuthenticated) {
             logger.log("Authenticate request failed");
@@ -1139,6 +1162,40 @@ export class CodexAcpServer {
         };
     }
 
+    /**
+     * Rewind (回退) the conversation to just before a user message. Backed by the
+     * app-server's `thread/rollback` (which truncates + persists history but does
+     * NOT touch files — the editor's change tracker handles file rollback). On a
+     * real (non-dryRun) call we stream the truncated history back as session
+     * updates: the renderer has reset its timeline and is replaying, so it
+     * rebuilds cleanly. The response reports only `canRewind`; file impact stats
+     * are computed editor-side since codex can't roll files back.
+     */
+    async rewindSession(params: RewindSessionRequest): Promise<RewindSessionResponse> {
+        const {sessionId, messageId, dryRun} = params;
+        logger.log("Rewind session requested", {sessionId, messageId, dryRun});
+        // Verify the session is live so replay targets a subscribed thread.
+        this.getSessionState(sessionId);
+
+        if (dryRun === true) {
+            const preview = await this.runWithProcessCheck(() =>
+                this.codexAcpClient.readThread(sessionId),
+            );
+            return {canRewind: this.codexAcpClient.canRollbackTo(preview, messageId)};
+        }
+
+        const truncated = await this.runWithProcessCheck(() =>
+            this.codexAcpClient.rollbackSession(sessionId, messageId),
+        );
+        if (truncated === undefined) {
+            logger.log("Rewind found no matching anchor", {sessionId, messageId});
+            return {canRewind: false};
+        }
+        await this.streamThreadHistory(sessionId, truncated);
+        logger.log("Rewind persisted", {sessionId, turns: truncated.turns.length});
+        return {canRewind: true};
+    }
+
     private createSessionConfigOptions(sessionState: SessionState): Array<acp.SessionConfigOption> {
         const currentModelId = ModelId.fromString(sessionState.currentModelId);
         const configOptions = [
@@ -1508,7 +1565,11 @@ export class CodexAcpServer {
 
     private createUserMessageUpdates(item: ThreadItem & { type: "userMessage" }): UpdateSessionEvent[] {
         const updates: UpdateSessionEvent[] = [];
-        const messageId = item.id;
+        // Prefer the client-supplied anchor so replayed history carries the same
+        // messageId the editor stamped on the original prompt — rewind/fork
+        // buttons key off it. Fall back to the item id for older threads that
+        // predate clientId capture.
+        const messageId = item.clientId ?? item.id;
         for (const input of item.content) {
             const blocks = this.userInputToContentBlocks(input);
             for (const block of blocks) {
@@ -2310,7 +2371,7 @@ export class CodexAcpServer {
     }
 }
 
-function mergeHistoryUpdates(
+export function mergeHistoryUpdates(
     responseItemFallbackUpdates: UpdateSessionEvent[],
     threadUpdates: UpdateSessionEvent[],
 ): UpdateSessionEvent[] {
@@ -2359,8 +2420,19 @@ function mergeHistoryUpdates(
         pushUpdate(update);
     }
 
+    // `thread.turns` is the authoritative source for how many turns of history
+    // exist; the disk fallback only fills in per-turn tool details that `turns`
+    // drops (its items are "lossy"). After rewind/fork the thread is truncated
+    // but the fallback still reads the full rollout file, so the leftover tail
+    // contains the dropped turns. Each turn begins with a user message, so we
+    // stop flushing at the first trailing `user_message_chunk`: everything up to
+    // it belongs to the last kept turn; everything from it on is a dropped turn.
     while (fallbackIndex < responseItemFallbackUpdates.length) {
-        pushUpdate(responseItemFallbackUpdates[fallbackIndex]!);
+        const update = responseItemFallbackUpdates[fallbackIndex]!;
+        if (update.sessionUpdate === "user_message_chunk") {
+            break;
+        }
+        pushUpdate(update);
         fallbackIndex += 1;
     }
 
