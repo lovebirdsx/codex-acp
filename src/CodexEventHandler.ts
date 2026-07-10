@@ -977,6 +977,14 @@ export class CodexEventHandler {
             this.failure = RequestError.internalError(
                 this.createTurnErrorData(params.error),
             );
+        } else if (!params.willRetry) {
+            // fork-only: any terminal error the agent won't retry (e.g. the stream
+            // disconnecting after exhausting reconnect attempts) must fail the
+            // turn. Otherwise the error only surfaces as a text chunk while the
+            // prompt still resolves with `end_turn`, so the client mislabels a
+            // dead turn as completed. `willRetry: true` errors are transient
+            // (codex is still retrying) and left as informational text only.
+            this.failure = RequestError.internalError(this.createTurnErrorData(params.error));
         }
         return createAgentTextMessageChunk(`${readableServiceErrorMessage(params.error.message)}\n\n`);
     }
