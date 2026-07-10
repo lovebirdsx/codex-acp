@@ -141,6 +141,40 @@ describe("CodexEventHandler - auth error events", () => {
             });
         },
     );
+
+    it("fails the turn on a terminal stream disconnect (willRetry: false)", async () => {
+        const {result: error} = await runPromptWithError(
+            createTestSessionState({ sessionId: "disconnected-session" }),
+            {
+                message: "stream disconnected before completion: stream closed before response.completed",
+                codexErrorInfo: { responseStreamDisconnected: { httpStatusCode: null } },
+                additionalDetails: null,
+            },
+            false,
+        );
+
+        expect(error).toMatchObject({
+            code: -32603,
+            message: "Internal error",
+            data: {
+                message: "stream disconnected before completion: stream closed before response.completed",
+                codexErrorInfo: { responseStreamDisconnected: { httpStatusCode: null } },
+            },
+        });
+    });
+
+    it("does not fail the turn on a retryable error (willRetry: true)", async () => {
+        const stopReason = await runPromptWithRetryableError(
+            createTestSessionState({ sessionId: "retrying-session" }),
+            {
+                message: "stream disconnected before completion; retrying",
+                codexErrorInfo: { responseStreamDisconnected: { httpStatusCode: null } },
+                additionalDetails: null,
+            },
+        );
+
+        expect(stopReason).toBe("end_turn");
+    });
 });
 
 async function runPromptWithError(
@@ -192,6 +226,48 @@ async function runPromptWithError(
         result,
         updates: mockFixture.getAcpConnectionEvents([]).map(event => event.args[0].update),
     };
+}
+
+async function runPromptWithRetryableError(
+    sessionState: SessionState,
+    turnError: ErrorNotification["error"],
+): Promise<string> {
+    const mockFixture = createCodexMockTestFixture();
+    const codexAcpAgent = mockFixture.getCodexAcpAgent();
+    const codexAppServerClient = mockFixture.getCodexAppServerClient();
+    const turnCompleted = deferred<TurnCompletedNotification>();
+    const turnStartSpy = vi.spyOn(codexAppServerClient, "turnStart").mockResolvedValue({
+        turn: createTurn("inProgress"),
+    });
+    vi.spyOn(codexAppServerClient, "awaitTurnCompleted").mockReturnValue(turnCompleted.promise);
+    vi.spyOn(codexAcpAgent, "getSessionState").mockReturnValue(sessionState);
+
+    const promptPromise = codexAcpAgent.prompt({
+        sessionId: sessionState.sessionId,
+        prompt: [{ type: "text", text: "test" }],
+    });
+
+    await vi.waitFor(() => {
+        expect(turnStartSpy).toHaveBeenCalled();
+    });
+
+    mockFixture.sendServerNotification({
+        method: "error",
+        params: {
+            threadId: sessionState.sessionId,
+            turnId: "turn-id",
+            willRetry: true,
+            error: turnError,
+        },
+    });
+
+    turnCompleted.resolve({
+        threadId: sessionState.sessionId,
+        turn: createTurn("completed"),
+    });
+
+    const response = await promptPromise;
+    return response.stopReason;
 }
 
 function createTurn(status: "inProgress" | "completed") {
