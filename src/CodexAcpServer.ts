@@ -3641,6 +3641,21 @@ export class CodexAcpServer {
             return;
         }
 
+        // fork-only: abort the in-flight prompt only when there's nothing for
+        // interruptSessionTurn to act on: no started turn AND no pending
+        // turn-start registered. This is the window a cancel hits when the user
+        // cancels right after sending on a fresh session, while startup work
+        // (event subscription / skill discovery) is still running before any turn
+        // has been requested — interruptSessionTurn would silently no-op and the
+        // prompt would run to a normal `end_turn`, leaving the session going.
+        // Aborting the ActivePrompt makes the prompt flow short-circuit to
+        // `cancelledPromptResponse` at its next checkpoint. Once a turn (or its
+        // pending start) exists, the existing interruptSessionTurn path handles
+        // it and must keep its wait-for-routing semantics untouched.
+        if (!sessionState.currentTurnId && !this.pendingTurnStarts.has(params.sessionId)) {
+            this.activePrompts.get(params.sessionId)?.requestCancel();
+        }
+
         // After turnInterrupt(), Codex will send turn/completed, which naturally completes awaitTurnCompleted().
         await this.interruptSessionTurn(sessionState, "Cancel", false);
     }
