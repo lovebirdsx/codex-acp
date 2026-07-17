@@ -1144,6 +1144,61 @@ describe('ACP server test', { timeout: 40_000 }, () => {
         await expect(promptPromise).resolves.toMatchObject({stopReason: "cancelled"});
     });
 
+    it('interrupts the session when the ACP session/cancel notification arrives before the turn starts', async () => {
+        const { mockFixture, sessionState, turnStartSpy } = setupPromptFixture();
+        // cancel() dispatches through the local session registry.
+        // @ts-expect-error - registering local session state for the ACP cancel path
+        mockFixture.getCodexAcpAgent().sessions.set("session-id", sessionState);
+
+        // Hang startup before the turn is registered, so the ACP cancel lands in
+        // the window where neither currentTurnId nor a pending turn-start exists —
+        // exactly what happens when the user cancels right after sending on a fresh
+        // session.
+        const subscribe = deferred<void>();
+        vi.spyOn(mockFixture.getCodexAcpClient(), "subscribeToSessionEvents")
+            .mockReturnValue(subscribe.promise);
+
+        const promptPromise = mockFixture.getCodexAcpAgent().prompt({
+            sessionId: "session-id",
+            prompt: [{ type: "text", text: "long running prompt" }],
+        });
+        await flushAsyncWork();
+
+        // The editor cancels via the ACP session/cancel notification — NOT a
+        // prompt request-signal abort, which is a path the editor never takes.
+        await mockFixture.getCodexAcpAgent().cancel({ sessionId: "session-id" });
+
+        // Release startup: the prompt must resolve as cancelled and never let the
+        // turn run to a normal end_turn (which would leave the session running).
+        subscribe.resolve();
+
+        const response = await promptPromise;
+        expect(response.stopReason).toBe("cancelled");
+        expect(turnStartSpy).not.toHaveBeenCalled();
+    });
+
+    it('notifies "Conversation interrupted" when cancelled before the turn starts', async () => {
+        const { mockFixture, sessionState } = setupPromptFixture();
+        // @ts-expect-error - registering local session state for the ACP cancel path
+        mockFixture.getCodexAcpAgent().sessions.set("session-id", sessionState);
+
+        const subscribe = deferred<void>();
+        vi.spyOn(mockFixture.getCodexAcpClient(), "subscribeToSessionEvents")
+            .mockReturnValue(subscribe.promise);
+
+        const promptPromise = mockFixture.getCodexAcpAgent().prompt({
+            sessionId: "session-id",
+            prompt: [{ type: "text", text: "long running prompt" }],
+        });
+        await flushAsyncWork();
+
+        await mockFixture.getCodexAcpAgent().cancel({ sessionId: "session-id" });
+        subscribe.resolve();
+        await promptPromise;
+
+        expect(mockFixture.getAcpConnectionDump([])).toContain("Conversation interrupted");
+    });
+
     it('returns success when a cancelled ACP prompt request completes before interruption wins', async () => {
         const { mockFixture, sessionState } = setupPromptFixture();
         const turnCompleted = deferred<TurnCompletedNotification>();

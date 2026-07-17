@@ -2003,7 +2003,7 @@ export class CodexAcpServer {
                 elicitationHandler);
 
             if (activePrompt.signal.aborted) {
-                return this.cancelledPromptResponse(sessionState);
+                return await this.cancelledPromptResponse(sessionState);
             }
 
             const commandPromise = this.availableCommands.tryHandleCommand(params.prompt, sessionState, {
@@ -2045,13 +2045,13 @@ export class CodexAcpServer {
                 this.cancelBeforeTurnStarted(activePrompt),
             ]);
             if (commandResult === null) {
-                return this.cancelledPromptResponse(sessionState);
+                return await this.cancelledPromptResponse(sessionState);
             }
             if (commandResult.handled) {
                 logger.log("Prompt handled by a command");
                 await this.codexAcpClient.waitForSessionNotifications(params.sessionId);
                 if (commandResult.turnCompleted?.turn.status === "interrupted") {
-                    return this.cancelledPromptResponse(sessionState);
+                    return await this.cancelledPromptResponse(sessionState);
                 }
                 const error = eventHandler.getFailure();
                 if (error) {
@@ -2066,7 +2066,7 @@ export class CodexAcpServer {
             }
 
             if (this.sessionIsClosing(params.sessionId)) {
-                return this.cancelledPromptResponse(sessionState);
+                return await this.cancelledPromptResponse(sessionState);
             }
 
             const modelId = ModelId.fromString(sessionState.currentModelId);
@@ -2124,14 +2124,14 @@ export class CodexAcpServer {
             ]);
 
             if (turnCompleted === null) {
-                return this.cancelledPromptResponse(sessionState);
+                return await this.cancelledPromptResponse(sessionState);
             }
 
             await this.codexAcpClient.waitForSessionNotifications(params.sessionId);
 
             if (turnCompleted.turn.status === "interrupted") {
                 await eventHandler.flushPendingPlanUpdates();
-                return this.cancelledPromptResponse(sessionState);
+                return await this.cancelledPromptResponse(sessionState);
             }
 
             const error = eventHandler.getFailure();
@@ -2153,7 +2153,7 @@ export class CodexAcpServer {
                     activePrompt.signal,
                 );
                 if (this.promptShouldStop(params.sessionId, activePrompt)) {
-                    return this.cancelledPromptResponse(sessionState);
+                    return await this.cancelledPromptResponse(sessionState);
                 }
                 if (approved && !this.promptShouldStop(params.sessionId, activePrompt)) {
                     await this.applyCollaborationModeChange(sessionState, DEFAULT_COLLABORATION_MODE);
@@ -2201,13 +2201,13 @@ export class CodexAcpServer {
                     ]);
 
                     if (turnCompleted === null) {
-                        return this.cancelledPromptResponse(sessionState);
+                        return await this.cancelledPromptResponse(sessionState);
                     }
 
                     await this.codexAcpClient.waitForSessionNotifications(params.sessionId);
                     if (turnCompleted.turn.status === "interrupted") {
                         await eventHandler.flushPendingPlanUpdates();
-                        return this.cancelledPromptResponse(sessionState);
+                        return await this.cancelledPromptResponse(sessionState);
                     }
 
                     const implementationError = eventHandler.getFailure();
@@ -2303,12 +2303,31 @@ export class CodexAcpServer {
         }
     }
 
-    private cancelledPromptResponse(sessionState: SessionState): acp.PromptResponse {
+    private async cancelledPromptResponse(sessionState: SessionState): Promise<acp.PromptResponse> {
+        // Every cancelled turn surfaces "Conversation interrupted" to the client.
+        // Previously this was only emitted when the turn reached an `interrupted`
+        // status; a cancel that beat the turn's start returned cancelled WITHOUT
+        // the notification, so the editor showed a lone `[cancelled]` while the
+        // agent kept running. The guard inside notifyConversationInterrupted
+        // suppresses this during session close.
+        await this.notifyConversationInterrupted(sessionState.sessionId);
         return {
             stopReason: "cancelled",
             usage: this.buildPromptUsage(sessionState.lastTokenUsage),
             _meta: this.buildQuotaMeta(sessionState),
         };
+    }
+
+    // Upstream (#358) removed this notification entirely, but the editor relies
+    // on it to render the interrupted state of a cancelled turn — keep it.
+    private async notifyConversationInterrupted(sessionId: string): Promise<void> {
+        if (this.sessionIsClosing(sessionId) || !this.sessions.has(sessionId)) {
+            return;
+        }
+        await this.connection.notify(acp.methods.client.session.update, {
+            sessionId,
+            update: createAgentTextMessageChunk("*Conversation interrupted*"),
+        });
     }
 
     private buildQuotaMeta(sessionState: SessionState): { quota: QuotaMeta } {
@@ -2364,6 +2383,21 @@ export class CodexAcpServer {
         if (!sessionState) {
             logger.log("Cancel request rejected: session not found", {sessionId: params.sessionId});
             return;
+        }
+
+        // Abort the in-flight prompt only when there's nothing for
+        // interruptSessionTurn to act on: no started turn AND no pending
+        // turn-start registered. This is the window a cancel hits when the user
+        // cancels right after sending on a fresh session, while startup work
+        // (event subscription / skill discovery) is still running before any turn
+        // has been requested — interruptSessionTurn would silently no-op and the
+        // prompt would run to a normal `end_turn`, leaving the session going.
+        // Aborting the ActivePrompt makes the prompt flow short-circuit to
+        // `cancelledPromptResponse` at its next checkpoint. Once a turn (or its
+        // pending start) exists, the existing interruptSessionTurn path handles
+        // it and must keep its wait-for-routing semantics untouched.
+        if (!sessionState.currentTurnId && !this.pendingTurnStarts.has(params.sessionId)) {
+            this.activePrompts.get(params.sessionId)?.requestCancel();
         }
 
         // After turnInterrupt(), Codex will send turn/completed, which naturally completes awaitTurnCompleted().
