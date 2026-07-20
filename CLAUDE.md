@@ -28,6 +28,16 @@
 
 rebase/merge 上游后，逐一核对这些改动是否仍在、是否需随上游 API 调整。
 
+## 配置 upstream remote
+
+本地 clone 默认只有 `origin`（fork）。remote 是本地状态、不随仓库传播，须每个 clone 各自配一次。在**父项目根目录**跑：
+
+```bash
+node scripts/setup-vendor-remotes.mjs   # 一键为两个 fork 配 upstream
+```
+
+或手动：`git -C vendor/codex-acp remote add upstream https://github.com/agentclientprotocol/codex-acp.git`。配完 `git -C vendor/codex-acp remote -v` 应含 `upstream`。
+
 ## 构建与父项目的衔接
 
 - 本仓库**不在** universe-editor 的 pnpm workspace 内，用自带 npm 工具链独立构建。
