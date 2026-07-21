@@ -233,6 +233,18 @@ export class CodexAcpServer {
                 version: packageJson.version,
             },
             agentCapabilities: {
+                _meta: {
+                    // universe-editor/* ext-capability advertisement. The editor reads
+                    // this instead of a hardcoded agentId white-list to decide whether
+                    // to show the rewind (回退) affordance. codex's thread/rollback only
+                    // truncates history — the editor rolls files back client-side via its
+                    // change tracker — so filesRolledBackByAgent: false.
+                    "universe-editor/capabilities": {
+                        rewind: {
+                            filesRolledBackByAgent: false,
+                        },
+                    },
+                },
                 auth: {
                     logout: {},
                 },

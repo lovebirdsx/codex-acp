@@ -38,6 +38,13 @@ describe('CodexACPAgent - initialize', () => {
                 version: packageJson.version,
             },
             agentCapabilities: {
+                _meta: {
+                    "universe-editor/capabilities": {
+                        rewind: {
+                            filesRolledBackByAgent: false,
+                        },
+                    },
+                },
                 auth: {
                     logout: {},
                 },
