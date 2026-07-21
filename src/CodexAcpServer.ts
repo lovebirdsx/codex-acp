@@ -448,6 +448,21 @@ export class CodexAcpServer {
                 version: packageJson.version,
             },
             agentCapabilities: {
+                _meta: {
+                    // universe-editor/* ext-capability advertisement. The editor reads
+                    // this instead of a hardcoded agentId white-list to decide whether
+                    // to show the rewind (回退) affordance. codex's thread/revert only
+                    // truncates history — the editor rolls files back client-side via its
+                    // change tracker — so filesRolledBackByAgent: false.
+                    "universe-editor/capabilities": {
+                        rewind: {
+                            filesRolledBackByAgent: false,
+                        },
+                    },
+                    // Presence means "this agent pushes `_auth/status_update`". It
+                    // never carries a payload, and the client never asks for one.
+                    [AUTH_STATUS_META_KEY]: authStatusCapability(),
+                },
                 auth: {
                     logout: {},
                 },
@@ -462,11 +477,6 @@ export class CodexAcpServer {
                     acp: false,
                     http: true,
                     sse: false
-                },
-                _meta: {
-                    // Presence means "this agent pushes `_auth/status_update`". It
-                    // never carries a payload, and the client never asks for one.
-                    [AUTH_STATUS_META_KEY]: authStatusCapability(),
                 },
             },
             authMethods: getCodexAuthMethods(_params.clientCapabilities),

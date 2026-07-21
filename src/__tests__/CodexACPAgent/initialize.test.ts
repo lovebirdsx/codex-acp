@@ -38,6 +38,14 @@ describe('CodexACPAgent - initialize', () => {
                 version: packageJson.version,
             },
             agentCapabilities: {
+                _meta: {
+                    "universe-editor/capabilities": {
+                        rewind: {
+                            filesRolledBackByAgent: false,
+                        },
+                    },
+                    authStatus: {},
+                },
                 auth: {
                     logout: {},
                 },
@@ -60,9 +68,6 @@ describe('CodexACPAgent - initialize', () => {
                     acp: false,
                     http: true,
                     sse: false,
-                },
-                _meta: {
-                    authStatus: {},
                 },
             },
             authMethods: getCodexAuthMethods(),
