@@ -55,6 +55,26 @@ describe("ResponseItemHistoryFallback", () => {
         expect(thoughtTexts(updates)).toEqual(["Need to inspect the directory."]);
     });
 
+    it("joins multiple reasoning summary parts with a section break", () => {
+        const updates = parseResponseItemHistoryFallback(jsonl([
+            {
+                type: "response_item",
+                payload: {
+                    type: "reasoning",
+                    summary: [
+                        { type: "summary_text", text: "**First plan**" },
+                        { type: "summary_text", text: "**Second plan**" },
+                    ],
+                    content: [],
+                },
+            },
+            functionCall("call-search", "rg \"Needle\" src"),
+            functionCallOutput("call-search", "Chunk ID: search\nProcess exited with code 0\nOutput:\nsrc/index.ts\n"),
+        ]), "terminal_output");
+
+        expect(thoughtTexts(updates)).toEqual(["**First plan**\n\n**Second plan**"]);
+    });
+
     it("preserves assistant message phase metadata from response items", () => {
         const updates = parseResponseItemHistoryFallback(jsonl([
             {

@@ -341,10 +341,17 @@ function createReasoningUpdates(item: JsonRecord): UpdateSessionEvent[] {
         parts.push(...textParts(item["content"]));
     }
 
-    return parts.map((text) => ({
+    // Same "\n\n" section break as the live stream between summary parts;
+    // the client concatenates thought chunks verbatim (see CodexAcpServer).
+    const text = parts.filter((part) => part.length > 0).join("\n\n");
+    if (text.length === 0) {
+        return [];
+    }
+
+    return [{
         sessionUpdate: "agent_thought_chunk",
         content: { type: "text", text },
-    }));
+    }];
 }
 
 function textParts(value: unknown): string[] {

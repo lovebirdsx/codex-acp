@@ -177,7 +177,7 @@
         "messageId": "item-reason-1",
         "content": {
           "type": "text",
-          "text": "Thinking..."
+          "text": "Thinking...\n\nStill thinking..."
         }
       }
     }

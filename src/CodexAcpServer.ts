@@ -1593,8 +1593,13 @@ export class CodexAcpServer {
 
     private createReasoningUpdates(item: ThreadItem & { type: "reasoning" }): UpdateSessionEvent[] {
         const parts = item.summary.length > 0 ? item.summary : item.content;
-        const messageId = item.id;
-        return parts.map((text) => createAgentTextThoughtChunk(text, messageId));
+        // Join parts with the same "\n\n" section break the live stream emits
+        // between them (CodexEventHandler.createReasoningSectionBreakEvent /
+        // createCompletedReasoningEvent). The client concatenates thought
+        // chunks verbatim, so one chunk per part without a separator fuses
+        // the parts into a single blob.
+        const text = parts.filter((part) => part.length > 0).join("\n\n");
+        return text.length > 0 ? [createAgentTextThoughtChunk(text, item.id)] : [];
     }
 
     private createWebSearchUpdate(

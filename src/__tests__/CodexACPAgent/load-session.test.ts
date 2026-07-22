@@ -96,7 +96,7 @@ describe("CodexACPAgent - loadSession", () => {
                         {
                             type: "reasoning",
                             id: "item-reason-1",
-                            summary: ["Thinking..."],
+                            summary: ["Thinking...", "Still thinking..."],
                             content: [],
                         },
                         {
