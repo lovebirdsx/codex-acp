@@ -136,6 +136,62 @@ describe("CodexACPAgent - list sessions", () => {
         );
     });
 
+    it("surfaces the rollout path as _meta.transcriptPath when the thread has one", async () => {
+        const fixture = createCodexMockTestFixture();
+        const codexAcpAgent = fixture.getCodexAcpAgent();
+        const codexAcpClient = fixture.getCodexAcpClient();
+        const codexAppServerClient = fixture.getCodexAppServerClient();
+
+        codexAcpClient.authRequired = vi.fn().mockResolvedValue(false);
+
+        const withPath: Thread = {
+            id: "sess-1",
+            sessionId: "sess-1",
+            parentThreadId: null,
+            threadSource: null,
+            forkedFromId: null,
+            preview: "Persisted session",
+            ephemeral: false,
+            modelProvider: "openai",
+            createdAt: 100,
+            updatedAt: 200,
+            recencyAt: null,
+            status: { type: "idle" },
+            path: "/home/u/.codex/sessions/2026/07/22/rollout-sess-1.jsonl",
+            cwd: "/repo/project",
+            cliVersion: "0.0.0",
+            source: "cli",
+            agentNickname: null,
+            agentRole: null,
+            gitInfo: null,
+            name: null,
+            turns: [],
+        };
+        const ephemeral: Thread = {
+            ...withPath,
+            id: "sess-2",
+            sessionId: "sess-2",
+            ephemeral: true,
+            path: null,
+        };
+
+        codexAppServerClient.threadList = vi.fn().mockResolvedValue({
+            data: [withPath, ephemeral],
+            nextCursor: null,
+        });
+
+        const response = await codexAcpAgent.listSessions({
+            cwd: null,
+            cursor: null,
+        });
+
+        expect(response.sessions).toHaveLength(2);
+        expect(response.sessions[0]?._meta).toEqual({
+            transcriptPath: "/home/u/.codex/sessions/2026/07/22/rollout-sess-1.jsonl",
+        });
+        expect(response.sessions[1]?._meta).toBeUndefined();
+    });
+
     it("includes tracked additional directories for active sessions", async () => {
         const fixture = createCodexMockTestFixture();
         const codexAcpAgent = fixture.getCodexAcpAgent();

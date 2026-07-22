@@ -946,11 +946,17 @@ export class CodexAcpClient {
             sourceKinds: sourceKinds,
         });
 
+        // ACP `SessionInfo` has no standard transcript-path field; carry the
+        // thread's on-disk rollout JSONL path through `_meta.transcriptPath`
+        // (parity with the claude fork) so the editor's "Open Session
+        // Location" can reveal it in the OS file manager. Ephemeral threads
+        // have no path and omit it.
         const mapThreadToSession = (thread: Thread) => ({
             sessionId: thread.id,
             cwd: thread.cwd,
             title: (thread.name ?? thread.preview) || null,
             updatedAt: new Date(thread.updatedAt * 1000).toISOString(),
+            ...(thread.path ? {_meta: {transcriptPath: thread.path}} : {}),
         });
 
         if (listResponse.data.length === 0) {
