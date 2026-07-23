@@ -136,6 +136,77 @@ describe("ResponseItemHistoryFallback", () => {
 
         expect(toolCallKinds(updates)).toEqual([{ toolCallId: "call-read", kind: "read" }]);
     });
+
+    it("recovers exec shell_command custom tool calls missing from the thread", () => {
+        const updates = parseResponseItemHistoryFallback(jsonl([
+            execShellCommandCall("call-shell", "Get-ChildItem -Force; rg --files games"),
+            execCustomToolCallOutput("call-shell", [
+                "Script completed\nWall time 1.4 seconds\nOutput:\n",
+                "Exit code: 0\nWall time: 0.7 seconds\nOutput:\nindex.html\nstyle.css\n",
+            ]),
+        ]), "terminal_output");
+
+        expect(toolCallKinds(updates)).toEqual([{ toolCallId: "call-shell", kind: "execute" }]);
+        expect(toolCallTitles(updates)).toEqual([
+            { toolCallId: "call-shell", title: "Get-ChildItem -Force; rg --files games" },
+        ]);
+        expect(toolCallUsesTerminal(updates, "call-shell")).toBe(true);
+        expect(toolCallUpdateStatuses(updates)).toEqual([
+            { toolCallId: "call-shell", status: "completed" },
+        ]);
+        expect(toolCallRawOutputs(updates)).toEqual([
+            { formatted_output: "index.html\nstyle.css\n", exit_code: 0 },
+        ]);
+    });
+
+    it("marks exec shell_command custom tool calls failed when the script reports a non-zero exit", () => {
+        const updates = parseResponseItemHistoryFallback(jsonl([
+            execShellCommandCall("call-failed", "node --check broken.js"),
+            execCustomToolCallOutput("call-failed", [
+                "Script failed\nWall time 0.9 seconds\nOutput:\n",
+                "Script error:\nExit code: 1\nWall time: 0.8 seconds\nOutput:\nsyntax error\n",
+            ]),
+        ]), "terminal_output");
+
+        expect(toolCallUpdateStatuses(updates)).toEqual([
+            { toolCallId: "call-failed", status: "failed" },
+        ]);
+        expect(toolCallRawOutputs(updates)).toEqual([
+            { formatted_output: "syntax error\n", exit_code: 1 },
+        ]);
+    });
+
+    it("skips exec apply_patch custom tool calls rebuilt as fileChange thread items", () => {
+        const updates = parseResponseItemHistoryFallback(jsonl([
+            execApplyPatchCall("call-patch"),
+            execCustomToolCallOutput("call-patch", [
+                "Script completed\nWall time 0.1 seconds\nOutput:\n",
+                "{}",
+            ]),
+        ]), "terminal_output");
+
+        expect(updates).toBeNull();
+    });
+
+    it("recovers only shell exec calls from mixed custom tool call histories", () => {
+        const updates = parseResponseItemHistoryFallback(jsonl([
+            execShellCommandCall("call-shell", "rg --files src"),
+            execCustomToolCallOutput("call-shell", [
+                "Script completed\nWall time 0.2 seconds\nOutput:\n",
+                "Exit code: 0\nWall time: 0.2 seconds\nOutput:\nsrc/index.ts\n",
+            ]),
+            execApplyPatchCall("call-patch"),
+            execCustomToolCallOutput("call-patch", [
+                "Script completed\nWall time 0.1 seconds\nOutput:\n",
+                "{}",
+            ]),
+        ]), "terminal_output");
+
+        expect(toolCallIds(updates)).toEqual(["call-shell"]);
+        expect(toolCallUpdateStatuses(updates)).toEqual([
+            { toolCallId: "call-shell", status: "completed" },
+        ]);
+    });
 });
 
 function jsonl(records: unknown[]): string {
@@ -185,6 +256,47 @@ function functionCallOutput(callId: string, output: string): unknown {
     };
 }
 
+function execShellCommandCall(callId: string, command: string): unknown {
+    const args = JSON.stringify({ command, workdir: "F:\\test\\test", timeout_ms: 10000 });
+    return {
+        type: "response_item",
+        payload: {
+            type: "custom_tool_call",
+            status: "completed",
+            call_id: callId,
+            name: "exec",
+            input: `const r = await tools.shell_command(${args});\n`
+                + "text(typeof r === \"string\" ? r : JSON.stringify(r));",
+        },
+    };
+}
+
+function execApplyPatchCall(callId: string): unknown {
+    const patch = "*** Begin Patch\\n*** Add File: F:\\\\test\\\\test\\\\index.html\\n+<html>\\n*** End Patch";
+    return {
+        type: "response_item",
+        payload: {
+            type: "custom_tool_call",
+            status: "completed",
+            call_id: callId,
+            name: "exec",
+            input: `const patch = "${patch}";\nconst r = await tools.apply_patch(patch);\n`
+                + "text(typeof r === \"string\" ? r : JSON.stringify(r));",
+        },
+    };
+}
+
+function execCustomToolCallOutput(callId: string, texts: string[]): unknown {
+    return {
+        type: "response_item",
+        payload: {
+            type: "custom_tool_call_output",
+            call_id: callId,
+            output: texts.map((text) => ({ type: "input_text", text })),
+        },
+    };
+}
+
 function toolCallIds(updates: UpdateSessionEvent[] | null): string[] {
     return (updates ?? [])
         .filter((update): update is Extract<UpdateSessionEvent, { sessionUpdate: "tool_call" }> => (
@@ -200,6 +312,12 @@ function toolCallUpdateStatuses(updates: UpdateSessionEvent[] | null): Array<Pic
             toolCallId: update.toolCallId,
             status: update.status ?? null,
         }));
+}
+
+function toolCallRawOutputs(updates: UpdateSessionEvent[] | null): unknown[] {
+    return (updates ?? [])
+        .filter((update): update is ToolCallUpdate => update.sessionUpdate === "tool_call_update")
+        .map((update) => update.rawOutput);
 }
 
 function thoughtTexts(updates: UpdateSessionEvent[] | null): string[] {

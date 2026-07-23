@@ -72,7 +72,7 @@ export function parseResponseItemHistoryFallback(
     const execToolCallIds = new Set<string>();
     const skippedToolCallIds = new Set<string>();
     const emittedToolCallIds = new Set<string>();
-    let recoveredFunctionCall = false;
+    let recoveredMissingToolCall = false;
     let lastUpdateKey: string | null = null;
 
     const pushUpdates = (nextUpdates: UpdateSessionEvent[]) => {
@@ -123,7 +123,40 @@ export function parseResponseItemHistoryFallback(
                 if (!result) {
                     break;
                 }
-                recoveredFunctionCall = true;
+                recoveredMissingToolCall = true;
+                emittedToolCallIds.add(result.update.toolCallId);
+                if (result.usesTerminal) {
+                    terminalToolCallIds.add(result.update.toolCallId);
+                }
+                if (result.isExecCommand) {
+                    execToolCallIds.add(result.update.toolCallId);
+                }
+                pushUpdates([result.update]);
+                break;
+            }
+            case "custom_tool_call": {
+                const toolCallId = stringValue(item["call_id"]);
+                if (toolCallId && existingToolCallIds.has(toolCallId)) {
+                    skippedToolCallIds.add(toolCallId);
+                    break;
+                }
+                if (toolCallId && emittedToolCallIds.has(toolCallId)) {
+                    break;
+                }
+                const synthetic = shellFunctionCallFromCustomToolCall(item);
+                if (!synthetic) {
+                    // apply_patch 等非 shell 的 exec 负载由 app-server 重建为 fileChange
+                    // 线程项；跳过并抑制其输出，避免孤儿的 tool_call_update。
+                    if (toolCallId) {
+                        skippedToolCallIds.add(toolCallId);
+                    }
+                    break;
+                }
+                const result = createFunctionCallUpdate(synthetic);
+                if (!result) {
+                    break;
+                }
+                recoveredMissingToolCall = true;
                 emittedToolCallIds.add(result.update.toolCallId);
                 if (result.usesTerminal) {
                     terminalToolCallIds.add(result.update.toolCallId);
@@ -150,12 +183,42 @@ export function parseResponseItemHistoryFallback(
                 }
                 break;
             }
+            case "custom_tool_call_output": {
+                const toolCallId = stringValue(item["call_id"]);
+                if (!toolCallId || skippedToolCallIds.has(toolCallId)) {
+                    break;
+                }
+                // 与 function_call_output 不同：custom 调用的 output 只在对应 call 已恢复时
+                // 才有意义（解析失败的 exec 调用不会产生可挂接的卡片）。
+                if (!emittedToolCallIds.has(toolCallId)) {
+                    break;
+                }
+                const result = shellResultFromCustomToolCallOutput(item["output"]);
+                if (!result) {
+                    break;
+                }
+                const update = createFunctionCallOutputUpdate(
+                    {
+                        call_id: toolCallId,
+                        output: result.exitCode !== null
+                            ? { output: result.output, exit_code: result.exitCode }
+                            : result.output,
+                    },
+                    terminalOutputMode,
+                    terminalToolCallIds,
+                    execToolCallIds,
+                );
+                if (update) {
+                    pushUpdates([update]);
+                }
+                break;
+            }
             default:
                 break;
         }
     }
 
-    return recoveredFunctionCall ? updates : null;
+    return recoveredMissingToolCall ? updates : null;
 }
 
 function toolCallIdsFromThread(thread: Thread): Set<string> {
@@ -374,8 +437,118 @@ function textParts(value: unknown): string[] {
     });
 }
 
-function createFunctionCallUpdate(item: JsonRecord): LegacyFunctionCallUpdate | null {
-    const toolCallId = stringValue(item["call_id"]);
+const SHELL_COMMAND_MARKER = "tools.shell_command(";
+
+// `exec` custom tool calls carry a JS snippet (`const r = await tools.shell_command({...})`)
+// instead of structured arguments. Recast shell invocations as `shell_command` function
+// calls so they share the rendering path with legacy function calls. Non-shell payloads
+// (apply_patch etc.) return null — the app-server rebuilds those as fileChange items.
+function shellFunctionCallFromCustomToolCall(item: JsonRecord): JsonRecord | null {
+    if (stringValue(item["name"]) !== "exec") {
+        return null;
+    }
+    const input = stringValue(item["input"]);
+    if (input === null) {
+        return null;
+    }
+    const args = extractShellCommandArguments(input);
+    if (args === null) {
+        return null;
+    }
+    return {
+        call_id: item["call_id"],
+        name: "shell_command",
+        arguments: args,
+    };
+}
+
+function extractShellCommandArguments(input: string): string | null {
+    const markerIndex = input.indexOf(SHELL_COMMAND_MARKER);
+    if (markerIndex === -1) {
+        return null;
+    }
+    let start = markerIndex + SHELL_COMMAND_MARKER.length;
+    while (start < input.length && /\s/.test(input[start]!)) {
+        start += 1;
+    }
+    if (input[start] !== "{") {
+        return null;
+    }
+    let depth = 0;
+    let inString = false;
+    let escaped = false;
+    for (let index = start; index < input.length; index += 1) {
+        const char = input[index]!;
+        if (inString) {
+            if (escaped) {
+                escaped = false;
+            } else if (char === "\\") {
+                escaped = true;
+            } else if (char === '"') {
+                inString = false;
+            }
+            continue;
+        }
+        if (char === '"') {
+            inString = true;
+        } else if (char === "{") {
+            depth += 1;
+        } else if (char === "}") {
+            depth -= 1;
+            if (depth === 0) {
+                const args = input.slice(start, index + 1);
+                try {
+                    JSON.parse(args);
+                } catch {
+                    return null;
+                }
+                return args;
+            }
+        }
+    }
+    return null;
+}
+
+// `custom_tool_call_output` chunks: the first is the JS runner wrapper
+// ("Script completed/failed…"), the rest is the tool result
+// ("[Script error:]Exit code: N\nWall time: …\nOutput:\n<actual output>").
+function shellResultFromCustomToolCallOutput(
+    output: unknown,
+): { output: string; exitCode: number | null } | null {
+    if (typeof output === "string") {
+        return parseExecShellResultText(output);
+    }
+    if (!Array.isArray(output)) {
+        return null;
+    }
+    const texts = output.flatMap((entry): string[] => {
+        const record = asRecord(entry);
+        const text = record ? stringValue(record["text"]) : null;
+        return text !== null ? [text] : [];
+    });
+    const resultTexts = texts.filter((text, index) => index > 0 || !isScriptWrapperChunk(text));
+    if (resultTexts.length === 0) {
+        return null;
+    }
+    return parseExecShellResultText(resultTexts.join("\n"));
+}
+
+function isScriptWrapperChunk(text: string): boolean {
+    return text.startsWith("Script completed") || text.startsWith("Script failed");
+}
+
+function parseExecShellResultText(text: string): { output: string; exitCode: number | null } {
+    const match = text.match(/^(?:Script error:\n)?Exit code: (-?\d+)\nWall time:[^\n]*\nOutput:\n?/);
+    if (!match) {
+        return { output: text, exitCode: null };
+    }
+    return {
+        output: text.slice(match[0].length),
+        exitCode: Number.parseInt(match[1] ?? "", 10),
+    };
+}
+
+function createFunctionCallUpdate(item: JsonRecord): LegacyFunctionCallUpdate | null {    const toolCallId = stringValue(item["call_id"]);
     const name = stringValue(item["name"]);
     if (!toolCallId || !name) {
         return null;
@@ -1061,6 +1234,11 @@ function withTerminalContent(
 function outputText(output: unknown): string {
     if (typeof output === "string") {
         return output;
+    }
+
+    const record = asRecord(output);
+    if (record) {
+        return stringValue(record["output"]) ?? "";
     }
 
     if (!Array.isArray(output)) {
