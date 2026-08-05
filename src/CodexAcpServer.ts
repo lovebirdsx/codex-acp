@@ -1451,6 +1451,19 @@ export class CodexAcpServer {
                 const updates = await this.createHistoryUpdates(item, sessionState);
                 threadUpdates.push(...updates);
             }
+            if (turn.status === "interrupted") {
+                // The rollout records the interruption as a synthetic `<turn_aborted>`
+                // user response_item that thread/resume does not reconstruct. Surface
+                // the same marker the editor appends live on cancel (and that the
+                // claude transcript carries as its own row), so a resumed session
+                // shows the interruption too. No messageId: the marker anchors
+                // nothing, and the editor's replay filter matches it by text when a
+                // retracted (zero-output) cancel needs it skipped.
+                threadUpdates.push(createUserMessageChunk({
+                    type: "text",
+                    text: "[Request interrupted by user]",
+                }));
+            }
         }
 
         const updates = responseItemFallbackUpdates
@@ -2321,30 +2334,17 @@ export class CodexAcpServer {
     }
 
     private async cancelledPromptResponse(sessionState: SessionState): Promise<acp.PromptResponse> {
-        // Every cancelled turn surfaces "Conversation interrupted" to the client.
-        // Previously this was only emitted when the turn reached an `interrupted`
-        // status; a cancel that beat the turn's start returned cancelled WITHOUT
-        // the notification, so the editor showed a lone `[cancelled]` while the
-        // agent kept running. The guard inside notifyConversationInterrupted
-        // suppresses this during session close.
-        await this.notifyConversationInterrupted(sessionState.sessionId);
+        // Fork: no "Conversation interrupted" notification here. The editor renders
+        // cancellation itself — a zero-output cancel retracts the prompt and restores
+        // the draft, a partial-output cancel appends its own interruption marker — so
+        // an extra agent chunk would either sit alone on a retracted (blank) session
+        // or duplicate the editor's marker. Resume replays the marker from the
+        // rollout's interrupted turn status instead (see streamThreadHistory).
         return {
             stopReason: "cancelled",
             usage: this.buildPromptUsage(sessionState.lastTokenUsage),
             _meta: this.buildQuotaMeta(sessionState),
         };
-    }
-
-    // Upstream (#358) removed this notification entirely, but the editor relies
-    // on it to render the interrupted state of a cancelled turn — keep it.
-    private async notifyConversationInterrupted(sessionId: string): Promise<void> {
-        if (this.sessionIsClosing(sessionId) || !this.sessions.has(sessionId)) {
-            return;
-        }
-        await this.connection.notify(acp.methods.client.session.update, {
-            sessionId,
-            update: createAgentTextMessageChunk("*Conversation interrupted*"),
-        });
     }
 
     private buildQuotaMeta(sessionState: SessionState): { quota: QuotaMeta } {

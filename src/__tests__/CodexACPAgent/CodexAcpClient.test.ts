@@ -1177,7 +1177,7 @@ describe('ACP server test', { timeout: 40_000 }, () => {
         expect(turnStartSpy).not.toHaveBeenCalled();
     });
 
-    it('notifies "Conversation interrupted" when cancelled before the turn starts', async () => {
+    it('does not notify "Conversation interrupted" — the editor renders cancellation itself', async () => {
         const { mockFixture, sessionState } = setupPromptFixture();
         // @ts-expect-error - registering local session state for the ACP cancel path
         mockFixture.getCodexAcpAgent().sessions.set("session-id", sessionState);
@@ -1196,7 +1196,10 @@ describe('ACP server test', { timeout: 40_000 }, () => {
         subscribe.resolve();
         await promptPromise;
 
-        expect(mockFixture.getAcpConnectionDump([])).toContain("Conversation interrupted");
+        // The chunk would sit alone on the editor's retracted (blank) session —
+        // a zero-output cancel restores the draft instead. The resume path
+        // replays the interruption marker from the turn's interrupted status.
+        expect(mockFixture.getAcpConnectionDump([])).not.toContain("Conversation interrupted");
     });
 
     it('returns success when a cancelled ACP prompt request completes before interruption wins', async () => {

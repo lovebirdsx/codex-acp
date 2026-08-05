@@ -228,6 +228,121 @@ describe("CodexACPAgent - loadSession", () => {
         );
     });
 
+    it("replays an interruption marker after an interrupted turn", async () => {
+        const fixture = createCodexMockTestFixture();
+        const codexAcpAgent = fixture.getCodexAcpAgent();
+        const codexAcpClient = fixture.getCodexAcpClient();
+        const codexAppServerClient = fixture.getCodexAppServerClient();
+
+        codexAcpClient.authRequired = vi.fn().mockResolvedValue(false);
+        codexAcpClient.getAccount = vi.fn().mockResolvedValue({
+            account: null,
+            requiresOpenaiAuth: false,
+        });
+        codexAcpClient.listSkills = vi.fn().mockResolvedValue({ data: [] });
+
+        const model = createTestModel({ id: "gpt-5.2", displayName: "GPT-5.2" });
+        codexAppServerClient.listModels = vi.fn().mockResolvedValue({
+            data: [model],
+            nextCursor: null,
+        });
+
+        // A cancelled turn resumes as status "interrupted" with whatever items
+        // the rollout persisted (the in-progress assistant output is lost).
+        // The marker stands in for the interruption so a resumed session shows
+        // the same trace the editor rendered live.
+        const thread: Thread = {
+            id: "session-interrupted",
+            sessionId: "session-interrupted",
+            parentThreadId: null,
+            threadSource: null,
+            forkedFromId: null,
+            preview: "Hi",
+            ephemeral: false,
+            modelProvider: "openai",
+            createdAt: 123,
+            updatedAt: 124,
+            recencyAt: null,
+            status: { type: "idle" },
+            path: null,
+            cwd: "/test/project",
+            cliVersion: "0.0.0",
+            source: "cli",
+            agentNickname: null,
+            agentRole: null,
+            gitInfo: null,
+            name: null,
+            turns: [
+                {
+                    id: "turn-1",
+                    itemsView: "full",
+                    status: "interrupted",
+                    error: null,
+                    startedAt: null,
+                    completedAt: null,
+                    durationMs: null,
+                    items: [
+                        {
+                            type: "userMessage",
+                            id: "item-user-1",
+                            clientId: "client-1",
+                            content: [{ type: "text", text: "Hi", text_elements: [] }],
+                        },
+                    ],
+                },
+                {
+                    id: "turn-2",
+                    itemsView: "full",
+                    status: "completed",
+                    error: null,
+                    startedAt: null,
+                    completedAt: null,
+                    durationMs: null,
+                    items: [
+                        {
+                            type: "userMessage",
+                            id: "item-user-2",
+                            clientId: "client-2",
+                            content: [{ type: "text", text: "Again", text_elements: [] }],
+                        },
+                        {
+                            type: "agentMessage",
+                            id: "item-agent-2",
+                            text: "Hello again!",
+                            phase: null,
+                            memoryCitation: null,
+                        },
+                    ],
+                },
+            ],
+        };
+        codexAppServerClient.threadResume = vi.fn().mockResolvedValue({
+            thread,
+            model: model.id,
+            modelProvider: "openai",
+            cwd: "/test/project",
+            approvalPolicy: "never",
+            sandbox: { type: "dangerFullAccess" },
+            reasoningEffort: model.defaultReasoningEffort,
+        });
+        codexAppServerClient.threadRead = vi.fn().mockResolvedValue({ thread });
+
+        await codexAcpAgent.initialize({ protocolVersion: 1 });
+        await codexAcpAgent.loadSession({
+            sessionId: thread.id,
+            cwd: "/test/project",
+            mcpServers: [],
+        });
+
+        const dump = fixture.getAcpConnectionDump([]);
+        const markerIndex = dump.indexOf("[Request interrupted by user]");
+        // The marker lands after the interrupted turn's user message and before
+        // the next turn; a completed turn gets none.
+        expect(markerIndex).toBeGreaterThan(dump.indexOf('"Hi"'));
+        expect(markerIndex).toBeLessThan(dump.indexOf('"Again"'));
+        expect(dump.indexOf("[Request interrupted by user]", markerIndex + 1)).toBe(-1);
+    });
+
     it("should not recover session mcp servers during loadSession when request omits them", async () => {
         const fixture = createCodexMockTestFixture();
         const codexAcpAgent = fixture.getCodexAcpAgent();
