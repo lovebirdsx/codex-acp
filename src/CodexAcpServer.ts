@@ -1049,10 +1049,11 @@ export class CodexAcpServer {
             modeState,
             thread,
             history,
+            materialized,
         } = await this.getOrCreateSessionWithHistory(params);
 
         try {
-            await this.streamThreadHistory(sessionId, thread, history);
+            await this.streamThreadHistory(sessionId, thread, history, materialized);
         } catch (err) {
             // A close during the load already closed the session.
             if (err instanceof SessionClosedDuringLoadError) {
@@ -2225,6 +2226,7 @@ export class CodexAcpServer {
         modeState: SessionModeState;
         thread: Thread;
         history: AsyncIterable<ThreadItem[]>;
+        materialized: boolean;
     }> {
         const requestedSessionGeneration = this.beginSessionOpen(request.sessionId);
         const loadStartedAt = performance.now();
@@ -2350,6 +2352,7 @@ export class CodexAcpServer {
             modeState: sessionModeState,
             thread: thread,
             history: sessionMetadata.history,
+            materialized: sessionMetadata.materialized,
         };
     }
 
@@ -2357,7 +2360,12 @@ export class CodexAcpServer {
      * Sends the history of a loaded session one page of items at a time. The
      * adapter keeps only the current page, not the whole history.
      */
-    private async streamThreadHistory(sessionId: string, thread: Thread, history: AsyncIterable<ThreadItem[]>): Promise<void> {
+    private async streamThreadHistory(
+        sessionId: string,
+        thread: Thread,
+        history: AsyncIterable<ThreadItem[]>,
+        materialized = true,
+    ): Promise<void> {
         const session = new ACPSessionConnection(this.connection, sessionId);
         const sessionState = this.getSessionState(sessionId);
         const generation = this.getSessionGeneration(sessionId);
@@ -2368,6 +2376,11 @@ export class CodexAcpServer {
         // The first user message of the first page names the session.
         await this.publishThreadHistoryTitle(session, sessionState, thread, firstPage);
         const itemPages = untilSessionClose(pagesStartingWith(firstPage, pages), isOpen);
+        // An unmaterialized thread has no persisted turns to query: paging it
+        // would only earn an app-server "not materialized yet" error.
+        const interruptedTurnTails = materialized
+            ? await this.codexAcpClient.interruptedTurnTailItemIds(sessionId)
+            : new Set<string>();
         if (clientSupportsSubagents(this.clientCapabilities)) {
             await this.streamNativeThreadHistory(
                 sessionId,
@@ -2376,16 +2389,42 @@ export class CodexAcpServer {
                 new Set([sessionId]),
                 new Set(),
                 isOpen,
+                interruptedTurnTails,
             );
             return;
         }
         for await (const items of itemPages) {
             for (const item of items) {
                 if (!isOpen()) throw new SessionClosedDuringLoadError();
-                for (const update of await this.createHistoryUpdates(item, sessionState)) {
-                    await session.update(update);
-                }
+                await this.streamHistoryItem(session, item, sessionState, interruptedTurnTails);
             }
+        }
+    }
+
+    /**
+     * fork-only: `interruptedTurnTails` holds the last item id of every turn of
+     * this thread whose status is `interrupted`. The rollout records an
+     * interruption as a synthetic `<turn_aborted>` user response_item that
+     * thread/resume and thread/items/list do not reconstruct, so the replay can
+     * only restore the interruption trace by emitting the same marker the editor
+     * appends live on cancel, right after that turn's last item. No messageId:
+     * the marker anchors nothing, and the editor's replay filter matches it by
+     * text when a retracted (zero-output) cancel needs it skipped.
+     */
+    private async streamHistoryItem(
+        session: ACPSessionConnection,
+        item: ThreadItem,
+        sessionState: SessionState,
+        interruptedTurnTails: ReadonlySet<string>,
+    ): Promise<void> {
+        for (const update of await this.createHistoryUpdates(item, sessionState)) {
+            await session.update(update);
+        }
+        if (interruptedTurnTails.has(item.id)) {
+            await session.update(createUserMessageChunk({
+                type: "text",
+                text: "[Request interrupted by user]",
+            }));
         }
     }
 
@@ -2396,6 +2435,7 @@ export class CodexAcpServer {
         ancestry: Set<string>,
         unreadableChildren: Set<string>,
         isOpen: () => boolean,
+        interruptedTurnTails: ReadonlySet<string>,
     ): Promise<void> {
         const session = new ACPSessionConnection(this.connection, sessionId);
         const announced = new Map<string, {generation: number; sessionId: string; terminal: boolean}>();
@@ -2441,6 +2481,7 @@ export class CodexAcpServer {
                                         new Set([...ancestry, item.agentThreadId]),
                                         unreadableChildren,
                                         isOpen,
+                                        interruptedTurnTails,
                                     );
                                 }
                                 catch (error) {
@@ -2491,9 +2532,7 @@ export class CodexAcpServer {
                 }
                 // The activity items above replay the lifecycle of a spawn. A control call is a tool call, as in the live session.
                 if (item.type === "collabAgentToolCall" && item.tool === "spawnAgent") continue;
-                for (const update of await this.createHistoryUpdates(item, sessionState)) {
-                    await session.update(update);
-                }
+                await this.streamHistoryItem(session, item, sessionState, interruptedTurnTails);
             }
         }
         for (const child of announced.values()) {
@@ -3563,6 +3602,12 @@ export class CodexAcpServer {
     }
 
     private cancelledPromptResponse(sessionState: SessionState): acp.PromptResponse {
+        // Fork: no "Conversation interrupted" notification here. The editor renders
+        // cancellation itself — a zero-output cancel retracts the prompt and restores
+        // the draft, a partial-output cancel appends its own interruption marker — so
+        // an extra agent chunk would either sit alone on a retracted (blank) session
+        // or duplicate the editor's marker. A resume restores the marker from the
+        // rollout's interrupted turn status instead (see streamHistoryItem).
         return {
             stopReason: "cancelled",
             usage: this.buildPromptUsage(sessionState.lastTokenUsage),

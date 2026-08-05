@@ -713,6 +713,7 @@ export class CodexAcpClient {
             currentServiceTier: response.serviceTier as ServiceTier ?? null,
             thread,
             history,
+            materialized: response.materialized,
             additionalDirectories,
         };
     }
@@ -741,6 +742,52 @@ export class CodexAcpClient {
             first += page.length;
         }
         return null;
+    }
+
+    /**
+     * fork-only: the id of the last item of every turn of `sessionId` whose
+     * status is `interrupted`. thread/resume and thread/items/list do not
+     * rebuild the synthetic `<turn_aborted>` user response_item the rollout
+     * stores for an interruption, so a replay restores the trace by emitting
+     * the editor's marker right after the last item of such a turn.
+     */
+    async interruptedTurnTailItemIds(sessionId: string): Promise<ReadonlySet<string>> {
+        const tails = new Set<string>();
+        try {
+            const metadata = await this.codexClient.threadRead({threadId: sessionId});
+            if (metadata.thread.historyMode === "legacy") {
+                const legacy = await this.codexClient.threadRead({threadId: sessionId, includeTurns: true});
+                for (const turn of legacy.thread.turns) {
+                    const tail = turn.items[turn.items.length - 1];
+                    if (turn.status === "interrupted" && tail !== undefined) tails.add(tail.id);
+                }
+                return tails;
+            }
+            const pages = this.codexClient.threadTurnPages({
+                threadId: sessionId,
+                limit: 50,
+                sortDirection: "asc",
+                itemsView: "notLoaded",
+            });
+            for await (const page of pages) {
+                for (const turn of page) {
+                    if (turn.status !== "interrupted") continue;
+                    const last = await this.codexClient.threadItemsList({
+                        threadId: sessionId,
+                        turnId: turn.id,
+                        cursor: null,
+                        limit: 1,
+                        sortDirection: "desc",
+                    });
+                    const tail = last.data[0]?.item.id;
+                    if (tail !== undefined) tails.add(tail);
+                }
+            }
+        } catch (error) {
+            // The marker is cosmetic: a session must still load when the extra read fails.
+            logger.log("Failed to read interrupted turns for the replay marker", {error: String(error)});
+        }
+        return tails;
     }
 
     /**

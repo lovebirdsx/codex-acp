@@ -822,4 +822,65 @@ describe("CodexACPAgent - loadSession", () => {
             expect(dump).toContain('MCP server `broken-mcp` failed to start: boom');
         });
     });
+
+    it("replays the editor's interruption marker after an interrupted turn", async () => {
+        const fixture = createCodexMockTestFixture();
+        const agent = fixture.getCodexAcpAgent();
+        const client = fixture.getCodexAcpClient();
+        const appServer = fixture.getCodexAppServerClient();
+        client.readAuthRequirement = vi.fn().mockResolvedValue({required: false, account: null});
+        client.getAccount = vi.fn().mockResolvedValue({account: null, requiresOpenaiAuth: false});
+        client.listSkills = vi.fn().mockResolvedValue({data: []});
+        const model = createTestModel();
+        appServer.listModels = vi.fn().mockResolvedValue({data: [model], nextCursor: null});
+        const turn = (id: string, status: "interrupted" | "completed", items: unknown[]) => ({
+            id,
+            itemsView: "full",
+            status,
+            error: null,
+            startedAt: null,
+            completedAt: null,
+            durationMs: null,
+            items,
+        });
+        const thread = {
+            id: "interrupted-history",
+            historyMode: "legacy",
+            turns: [
+                turn("turn-1", "interrupted", [
+                    {type: "userMessage", id: "user-1", clientId: null, content: [{type: "text", text: "cancelled", text_elements: []}]},
+                ]),
+                turn("turn-2", "completed", [
+                    {type: "userMessage", id: "user-2", clientId: null, content: [{type: "text", text: "next", text_elements: []}]},
+                    {type: "agentMessage", id: "agent-1", text: "hello", phase: null, memoryCitation: null, delivery: null, questions: null},
+                ]),
+            ],
+        } as unknown as Thread;
+        appServer.threadResume = vi.fn().mockResolvedValue({
+            thread,
+            model: model.id,
+            modelProvider: "openai",
+            cwd: "/workspace",
+            approvalPolicy: "never",
+            sandbox: {type: "dangerFullAccess"},
+            reasoningEffort: model.defaultReasoningEffort,
+        });
+        appServer.threadReadWithHistory = vi.fn().mockResolvedValue({thread});
+        appServer.threadRead = vi.fn().mockResolvedValue({thread});
+
+        await agent.initialize({protocolVersion: 1, clientCapabilities: {}});
+        await agent.loadSession({sessionId: thread.id, cwd: "/workspace", mcpServers: []});
+
+        const updates = fixture.getAcpConnectionEvents([])
+            .filter(event => event.method === "sessionUpdate")
+            .map(event => event.args[0].update);
+        const markerIndex = updates.findIndex(update => update.sessionUpdate === "user_message_chunk"
+            && update.content?.type === "text" && update.content.text === "[Request interrupted by user]");
+        expect(markerIndex).toBeGreaterThan(-1);
+        // The marker anchors nothing, so it carries no messageId.
+        expect(updates[markerIndex]?.messageId).toBeUndefined();
+        // It lands after the interrupted turn's items and before the next turn's replay.
+        expect(markerIndex).toBeGreaterThan(updates.findIndex(update => update.messageId === "user-1"));
+        expect(markerIndex).toBeLessThan(updates.findIndex(update => update.messageId === "user-2"));
+    });
 });

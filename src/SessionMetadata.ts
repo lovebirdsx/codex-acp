@@ -17,4 +17,6 @@ export type SessionMetadataWithThread = SessionMetadata & {
     thread: Thread,
     /** The items of the thread, oldest first, one page at a time. */
     history: AsyncIterable<ThreadItem[]>,
+    /** False when Codex has not materialized the thread on disk (no rollout yet). */
+    materialized: boolean,
 }
