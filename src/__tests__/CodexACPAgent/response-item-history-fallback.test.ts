@@ -207,6 +207,32 @@ describe("ResponseItemHistoryFallback", () => {
             { toolCallId: "call-shell", status: "completed" },
         ]);
     });
+
+    it("skips JS REPL internal wait calls and suppresses their outputs", () => {
+        const updates = parseResponseItemHistoryFallback(jsonl([
+            execShellCommandCall("call-shell", "rg --files src"),
+            replWaitCall("call-wait"),
+            functionCallOutput("call-wait", "{\"output\":\"src/index.ts\\n\"}"),
+            execCustomToolCallOutput("call-shell", [
+                "Script completed\nWall time 0.2 seconds\nOutput:\n",
+                "Exit code: 0\nWall time: 0.2 seconds\nOutput:\nsrc/index.ts\n",
+            ]),
+        ]), "terminal_output");
+
+        expect(toolCallIds(updates)).toEqual(["call-shell"]);
+        expect(toolCallUpdateStatuses(updates)).toEqual([
+            { toolCallId: "call-shell", status: "completed" },
+        ]);
+    });
+
+    it("returns null when the only recoverable calls are JS REPL internal wait calls", () => {
+        const updates = parseResponseItemHistoryFallback(jsonl([
+            replWaitCall("call-wait"),
+            functionCallOutput("call-wait", "{}"),
+        ]), "terminal_output");
+
+        expect(updates).toBeNull();
+    });
 });
 
 function jsonl(records: unknown[]): string {
@@ -256,8 +282,25 @@ function functionCallOutput(callId: string, output: string): unknown {
     };
 }
 
+function replWaitCall(callId: string): unknown {
+    return {
+        type: "response_item",
+        payload: {
+            type: "function_call",
+            name: "wait",
+            arguments: JSON.stringify({
+                cell_id: "1",
+                yield_time_ms: 10000,
+                max_tokens: 12000,
+            }),
+            call_id: callId,
+        },
+    };
+}
+
 function execShellCommandCall(callId: string, command: string): unknown {
-    const args = JSON.stringify({ command, workdir: "F:\\test\\test", timeout_ms: 10000 });
+    // Codex emits a JS object literal (bare keys), not strict JSON.
+    const args = `{command:${JSON.stringify(command)},workdir:"F:\\\\test\\\\test",timeout_ms:10000}`;
     return {
         type: "response_item",
         payload: {

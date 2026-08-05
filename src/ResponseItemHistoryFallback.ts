@@ -25,6 +25,11 @@ type ParsedShellCommand = {
 
 const EXEC_COMMAND_NAMES = new Set(["exec_command", "shell_command"]);
 
+// JS REPL internal functions (e.g. `wait`, which polls an exec cell's output) are
+// runtime plumbing: the app-server never exposes them as thread items live, so the
+// fallback must not resurrect them as tool call cards either.
+const JS_REPL_INTERNAL_TOOL_NAMES = new Set(["wait"]);
+
 function isExecCommandName(name: string): boolean {
     return EXEC_COMMAND_NAMES.has(name);
 }
@@ -112,6 +117,13 @@ export function parseResponseItemHistoryFallback(
                 break;
             case "function_call": {
                 const toolCallId = stringValue(item["call_id"]);
+                const name = stringValue(item["name"]);
+                if (name !== null && JS_REPL_INTERNAL_TOOL_NAMES.has(name)) {
+                    if (toolCallId) {
+                        skippedToolCallIds.add(toolCallId);
+                    }
+                    break;
+                }
                 if (toolCallId && existingToolCallIds.has(toolCallId)) {
                     skippedToolCallIds.add(toolCallId);
                     break;
@@ -496,17 +508,30 @@ function extractShellCommandArguments(input: string): string | null {
         } else if (char === "}") {
             depth -= 1;
             if (depth === 0) {
-                const args = input.slice(start, index + 1);
-                try {
-                    JSON.parse(args);
-                } catch {
-                    return null;
-                }
-                return args;
+                return normalizeJsObjectLiteral(input.slice(start, index + 1));
             }
         }
     }
     return null;
+}
+
+// The REPL snippet carries a JS object literal (`{command:"..."}`), not strict JSON —
+// bare identifier keys are legal there. Quote them so downstream JSON.parse succeeds;
+// string values already use JSON-compatible double-quote escaping.
+function normalizeJsObjectLiteral(args: string): string | null {
+    try {
+        JSON.parse(args);
+        return args;
+    } catch {
+        // fall through and retry with quoted keys
+    }
+    const quoted = args.replace(/([{,]\s*)([A-Za-z_$][\w$]*)\s*:/g, "$1\"$2\":");
+    try {
+        JSON.parse(quoted);
+    } catch {
+        return null;
+    }
+    return quoted;
 }
 
 // `custom_tool_call_output` chunks: the first is the JS runner wrapper
