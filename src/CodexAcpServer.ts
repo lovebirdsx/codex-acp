@@ -2707,12 +2707,19 @@ export class CodexAcpServer {
             item.content[index]?.type === "text"
                 ? blocks.flatMap(block => block.type === "resource_link" ? [block.uri] : [])
                 : []));
-        for (const [index, input] of item.content.entries()) {
+        // fork: replay image inputs ahead of text inputs. The live prompt
+        // leads with images (buildPromptItems preserves that wire order), but
+        // thread/resume rebuilds userMessage.content with the text input
+        // first — replaying it verbatim would render the restored picture
+        // after the user's text.
+        const ordered = item.content
+            .map((input, index) => ({input, blocks: contentBlocks[index]!}))
+            .sort((left, right) => userInputReplayOrder(left.input) - userInputReplayOrder(right.input));
+        for (const {input, blocks} of ordered) {
             const nativePath = input.type === "localImage" || input.type === "localAudio" || input.type === "mention"
                 ? input.path
                 : (input.type === "image" || input.type === "audio") && "url" in input ? input.url : null;
             if (nativePath !== null && attachmentUris.has(attachmentFileUri(nativePath) ?? "")) continue;
-            const blocks = contentBlocks[index]!;
             for (const block of blocks) {
                 updates.push(createUserMessageChunk(block, messageId));
             }
@@ -2769,13 +2776,22 @@ export class CodexAcpServer {
             case "text":
                 return desktopAttachmentHistory(input.text)
                     ?? (input.text.length > 0 ? [{ type: "text", text: input.text }] : []);
-            case "image":
+            case "image": {
+                // fork: pasted images persist as data: URLs (buildPromptItems).
+                // Restore them as real ACP image blocks so the resumed message
+                // renders them in the leading image row like the live path,
+                // not as an inline markdown link inside the text.
+                const image = "url" in input ? parseImageDataUrl(input.url) : null;
+                if (image) {
+                    return [{ type: "image", data: image.data, mimeType: image.mimeType }];
+                }
                 return [{
                     type: "text",
                     text: "url" in input
                         ? this.formatUriAsLink("image", input.url)
                         : `image:${input.fileId}`,
                 }];
+            }
             case "localImage":
             case "localAudio":
             case "mention": {
@@ -3720,6 +3736,22 @@ export class CodexAcpServer {
         // After turnInterrupt(), Codex will send turn/completed, which naturally completes awaitTurnCompleted().
         await this.interruptSessionTurn(sessionState, "Cancel", false);
     }
+}
+
+// fork: replay order for userMessage content inputs — images first, then
+// everything else in its original relative order (Array.prototype.sort is
+// stable, so non-image inputs keep their rollout sequence).
+function userInputReplayOrder(input: UserInput): number {
+    return input.type === "image" || input.type === "localImage" ? 0 : 1;
+}
+
+// fork: inverse of buildPromptItems' imageDataUrl (`data:<mime>;base64,<data>`).
+function parseImageDataUrl(url: string): { data: string; mimeType: string } | null {
+    const match = /^data:(image\/[a-z0-9.+-]+);base64,(.+)$/is.exec(url);
+    if (!match || !match[1] || !match[2]) {
+        return null;
+    }
+    return { data: match[2], mimeType: match[1] };
 }
 
 /** A close of the session stopped the read of its history during `session/load`. */
