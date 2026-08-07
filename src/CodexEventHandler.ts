@@ -182,6 +182,27 @@ const STRUCTURED_CODEX_ERROR_CATEGORIES = {
 
 export class CodexEventHandler {
 
+    /*
+     * Fork addition: idle-liveness probe. The editor's stall watchdog
+     * declares a running turn wedged after `acp.turnStallTimeoutMs` (default
+     * 10min) without any inbound session/update, then kills and reconnects
+     * the agent process. Codex emits NO periodic traffic during legitimately
+     * long silent operations (an output-less build command, a collab
+     * sub-agent the main thread waits on, a slow non-streaming model call),
+     * so those turns get killed mid-flight. Claude-side the SDK's
+     * tool_progress heartbeats keep the wire busy; Codex has no equivalent,
+     * hence this probe. Only the livenessPing notification itself counts as
+     * activity client-side — the lightweight thread/loaded/list round-trip
+     * is invisible to it, so the beacon NEVER suppresses a genuine wedge
+     * verdict: it converts "wedged" from "the process died silently" to
+     * "the process answers pings but produces nothing".
+     *
+     * Well under the editor's watchdog tick (60s) so even a probe that lands
+     * right after a watchdog check beats the next one.
+     */
+    private static readonly LIVENESS_PROBE_INTERVAL_MS = 30_000;
+    private static readonly LIVENESS_PROBE_TIMEOUT_MS = 10_000;
+
     private readonly sessionState: SessionState;
     private readonly supportsTypedSessionFailures: boolean;
     private readonly sessionFailureEpoch: string;
@@ -212,6 +233,18 @@ export class CodexEventHandler {
     /** Connection-level `authStatus` sink; the app-server account push feeds it. */
     private readonly onAccountUpdated: ((notification: AccountUpdatedNotification) => void) | undefined;
 
+    /*
+     * Fork addition: liveness probe state. `probeLiveness` is injected as a
+     * callback (not the app-server client) to keep this fork diff minimal and
+     * let tests stub it. `lastForwardedAt` tracks the last time a real
+     * session/update was forwarded to the ACP client; the probe only fires
+     * once the wire has been silent for a full interval.
+     */
+    private readonly probeLiveness: (() => Promise<unknown>) | undefined;
+    private lastForwardedAt = Date.now();
+    private livenessTimer: ReturnType<typeof setInterval> | null = null;
+    private probeInFlight = false;
+
     constructor(
         connection: AcpClientConnection,
         sessionState: SessionState,
@@ -222,6 +255,7 @@ export class CodexEventHandler {
         collectTurnDiffs: boolean,
         private readonly supportsCompaction: boolean,
         private readonly supportsNotices: boolean,
+        probeLiveness?: () => Promise<unknown>,
     ) {
         this.onAccountUpdated = onAccountUpdated;
         this.sessionState = sessionState;
@@ -235,6 +269,7 @@ export class CodexEventHandler {
         if (sessionState.sessionFailure !== undefined) {
             this.failuresById.set(sessionState.sessionFailure.id, sessionState.sessionFailure);
         }
+        this.probeLiveness = probeLiveness;
     }
 
     getFailure(): RequestError | null {
@@ -403,6 +438,7 @@ export class CodexEventHandler {
         if (updateEvent === undefined) updateEvent = await this.createUpdateEvent(notification);
         if (updateEvent) {
             await this.session.update(updateEvent, this.subagents.notificationSessionId(notification));
+            this.lastForwardedAt = Date.now();
         }
     }
 
@@ -460,6 +496,7 @@ export class CodexEventHandler {
 
     async dispose(): Promise<void> {
         if (this.disposed) return;
+        this.stopLivenessProbes();
         await this.plans.dispose();
         if (this.pendingErrors.length > 0) {
             logger.log("Discarding app-server errors that arrived before a turn started", {
@@ -472,6 +509,63 @@ export class CodexEventHandler {
         this.disposed = true;
         this.turnDiffs.clear();
         this.oversizedTurnDiffs.clear();
+    }
+
+    /*
+     * Fork addition: while a turn runs, check once per interval whether the
+     * ACP wire has gone silent; if so, ping the app-server core with a cheap
+     * read-only RPC and only forward a content-free liveness notification
+     * when the core answers. A genuinely wedged core fails the probe, so the
+     * editor's stall watchdog still kills the process on schedule.
+     */
+    private startLivenessProbes(): void {
+        if (!this.probeLiveness || this.livenessTimer) return;
+        this.livenessTimer = setInterval(() => {
+            void this.probeOnce();
+        }, CodexEventHandler.LIVENESS_PROBE_INTERVAL_MS);
+        this.livenessTimer.unref?.();
+    }
+
+    private stopLivenessProbes(): void {
+        if (!this.livenessTimer) return;
+        clearInterval(this.livenessTimer);
+        this.livenessTimer = null;
+    }
+
+    private async probeOnce(): Promise<void> {
+        if (this.disposed || this.probeInFlight || !this.probeLiveness) return;
+        if (this.sessionState.currentTurnId === null) return;
+        if (Date.now() - this.lastForwardedAt < CodexEventHandler.LIVENESS_PROBE_INTERVAL_MS) return;
+        this.probeInFlight = true;
+        try {
+            let timeout: ReturnType<typeof setTimeout> | null = null;
+            try {
+                await Promise.race([
+                    this.probeLiveness(),
+                    new Promise<never>((_resolve, reject) => {
+                        timeout = setTimeout(
+                            () => reject(new Error("liveness probe timed out")),
+                            CodexEventHandler.LIVENESS_PROBE_TIMEOUT_MS,
+                        );
+                    }),
+                ]);
+            } finally {
+                if (timeout) clearTimeout(timeout);
+            }
+        } catch (error) {
+            // Core did not answer: stay silent so the watchdog sees the wedge.
+            logger.log("Liveness probe failed; not forwarding a ping", {error: String(error)});
+            return;
+        } finally {
+            this.probeInFlight = false;
+        }
+        if (this.disposed || this.sessionState.currentTurnId === null) return;
+        this.lastForwardedAt = Date.now();
+        try {
+            await this.session.livenessPing();
+        } catch (error) {
+            logger.log("Failed to forward liveness ping", {error: String(error)});
+        }
     }
 
     private async createUpdateEvent(notification: ServerNotification): Promise<UpdateSessionEvent | null> {
@@ -518,9 +612,11 @@ export class CodexEventHandler {
                 return await this.createErrorEvent(notification.params);
             case "turn/started":
                 this.sessionState.currentTurnId = notification.params.turn.id;
+                this.startLivenessProbes();
                 await this.flushPendingErrors();
                 return null;
             case "turn/completed":
+                this.stopLivenessProbes();
                 await this.plans.flush();
                 this.plans.clearTurn();
                 this.sessionState.currentTurnId = null;

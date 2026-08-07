@@ -3132,6 +3132,7 @@ export class CodexAcpServer {
                 agentFileChangeReportRequest !== null,
                 clientSupportsCompaction(this.clientCapabilities),
                 clientSupportsNotices(this.clientCapabilities),
+                () => this.codexAcpClient.probeLiveness(),
             );
             eventHandler = promptEventHandler;
             const permissionLifecycle = this.permissionLifecycleContext(sessionState);
