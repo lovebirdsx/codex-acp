@@ -2015,6 +2015,7 @@ export class CodexAcpServer {
                 this.connection,
                 sessionState,
                 clientSupportsPlanUpdates(this.clientCapabilities),
+                () => this.codexAcpClient.probeLiveness(),
             );
             eventHandler = promptEventHandler;
             const approvalHandler = new CodexApprovalHandler(this.connection, sessionState, activePrompt.signal);

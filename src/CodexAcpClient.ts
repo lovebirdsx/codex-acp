@@ -743,6 +743,15 @@ export class CodexAcpClient {
         return ModelId.create(defaultModel.id, reasoningEffort ?? defaultModel.defaultReasoningEffort);
     }
 
+    /*
+     * Fork addition: cheap read-only RPC used by CodexEventHandler's
+     * liveness probe to verify the app-server core still answers before
+     * forwarding a proof-of-life notification to the ACP client.
+     */
+    async probeLiveness(): Promise<unknown> {
+        return await this.codexClient.threadLoadedList({limit: 1});
+    }
+
     async subscribeToSessionEvents(
         sessionId: string,
         eventHandler: (result: ServerNotification) => void | Promise<void>,
