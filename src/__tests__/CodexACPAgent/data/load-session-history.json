@@ -129,7 +129,7 @@
         "messageId": "item-user-1",
         "content": {
           "type": "text",
-          "text": "Hi"
+          "text": "[@image](https://example.com/image.png)"
         }
       }
     }
@@ -145,7 +145,7 @@
         "messageId": "item-user-1",
         "content": {
           "type": "text",
-          "text": "[@image](https://example.com/image.png)"
+          "text": "Hi"
         }
       }
     }

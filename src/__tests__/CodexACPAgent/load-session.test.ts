@@ -343,6 +343,106 @@ describe("CodexACPAgent - loadSession", () => {
         expect(dump.indexOf("[Request interrupted by user]", markerIndex + 1)).toBe(-1);
     });
 
+    it("replays image inputs ahead of text (thread/resume reorders content)", async () => {
+        const fixture = createCodexMockTestFixture();
+        const codexAcpAgent = fixture.getCodexAcpAgent();
+        const codexAcpClient = fixture.getCodexAcpClient();
+        const codexAppServerClient = fixture.getCodexAppServerClient();
+
+        codexAcpClient.authRequired = vi.fn().mockResolvedValue(false);
+        codexAcpClient.getAccount = vi.fn().mockResolvedValue({
+            account: null,
+            requiresOpenaiAuth: false,
+        });
+        codexAcpClient.listSkills = vi.fn().mockResolvedValue({ data: [] });
+
+        const model = createTestModel({ id: "gpt-5.2", displayName: "GPT-5.2" });
+        codexAppServerClient.listModels = vi.fn().mockResolvedValue({
+            data: [model],
+            nextCursor: null,
+        });
+
+        // The editor's live prompt leads with images, then text — but
+        // thread/resume rebuilds userMessage.content with the text input
+        // first. Replay must restore the live order or the resumed message
+        // renders the picture after the user's text. Pasted images persist
+        // as data: URLs (see buildPromptItems) and replay as real ACP image
+        // blocks so they land in the editor's leading image row, not as an
+        // inline markdown link inside the text.
+        const thread: Thread = {
+            id: "session-images",
+            sessionId: "session-images",
+            parentThreadId: null,
+            threadSource: null,
+            forkedFromId: null,
+            preview: "Hi",
+            ephemeral: false,
+            modelProvider: "openai",
+            createdAt: 123,
+            updatedAt: 124,
+            recencyAt: null,
+            status: { type: "idle" },
+            path: null,
+            cwd: "/test/project",
+            cliVersion: "0.0.0",
+            source: "cli",
+            agentNickname: null,
+            agentRole: null,
+            gitInfo: null,
+            name: null,
+            turns: [
+                {
+                    id: "turn-1",
+                    itemsView: "full",
+                    status: "completed",
+                    error: null,
+                    startedAt: null,
+                    completedAt: null,
+                    durationMs: null,
+                    items: [
+                        {
+                            type: "userMessage",
+                            id: "item-user-1",
+                            clientId: "client-1",
+                            content: [
+                                { type: "text", text: "Hi", text_elements: [] },
+                                { type: "image", url: "data:image/png;base64,iVBORw0KGgo=" },
+                                { type: "image", url: "https://example.com/image.png" },
+                            ],
+                        },
+                    ],
+                },
+            ],
+        };
+        codexAppServerClient.threadResume = vi.fn().mockResolvedValue({
+            thread,
+            model: model.id,
+            modelProvider: "openai",
+            cwd: "/test/project",
+            approvalPolicy: "never",
+            sandbox: { type: "dangerFullAccess" },
+            reasoningEffort: model.defaultReasoningEffort,
+        });
+        codexAppServerClient.threadRead = vi.fn().mockResolvedValue({ thread });
+
+        await codexAcpAgent.initialize({ protocolVersion: 1 });
+        await codexAcpAgent.loadSession({
+            sessionId: thread.id,
+            cwd: "/test/project",
+            mcpServers: [],
+        });
+
+        const userChunks = fixture.getAcpConnectionEvents([])
+            .filter((event) => event.method === "sessionUpdate")
+            .map((event) => event.args[0].update)
+            .filter((update) => update.sessionUpdate === "user_message_chunk");
+        expect(userChunks.map((chunk) => chunk.content)).toEqual([
+            { type: "image", data: "iVBORw0KGgo=", mimeType: "image/png" },
+            { type: "text", text: "[@image](https://example.com/image.png)" },
+            { type: "text", text: "Hi" },
+        ]);
+    });
+
     it("should not recover session mcp servers during loadSession when request omits them", async () => {
         const fixture = createCodexMockTestFixture();
         const codexAcpAgent = fixture.getCodexAcpAgent();

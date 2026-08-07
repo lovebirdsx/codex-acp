@@ -1595,7 +1595,13 @@ export class CodexAcpServer {
         // buttons key off it. Fall back to the item id for older threads that
         // predate clientId capture.
         const messageId = item.clientId ?? item.id;
-        for (const input of item.content) {
+        // fork: replay image inputs ahead of text inputs. The live prompt
+        // leads with images (buildPromptItems preserves that wire order), but
+        // thread/resume rebuilds userMessage.content with the text input
+        // first — replaying it verbatim would render the restored picture
+        // after the user's text.
+        const inputs = [...item.content].sort((a, b) => userInputReplayOrder(a) - userInputReplayOrder(b));
+        for (const input of inputs) {
             const blocks = this.userInputToContentBlocks(input);
             for (const block of blocks) {
                 updates.push(createUserMessageChunk(block, messageId));
@@ -1668,8 +1674,17 @@ export class CodexAcpServer {
         switch (input.type) {
             case "text":
                 return input.text.length > 0 ? [{ type: "text", text: input.text }] : [];
-            case "image":
+            case "image": {
+                // fork: pasted images persist as data: URLs (buildPromptItems).
+                // Restore them as real ACP image blocks so the resumed message
+                // renders them in the leading image row like the live path,
+                // not as an inline markdown link inside the text.
+                const image = parseImageDataUrl(input.url);
+                if (image) {
+                    return [{ type: "image", data: image.data, mimeType: image.mimeType }];
+                }
                 return [{ type: "text", text: this.formatUriAsLink("image", input.url) }];
+            }
             case "localImage": {
                 const uri = input.path.startsWith("file://") ? input.path : `file://${input.path}`;
                 return [{ type: "text", text: this.formatUriAsLink(null, uri) }];
@@ -2421,6 +2436,22 @@ export class CodexAcpServer {
         // After turnInterrupt(), Codex will send turn/completed, which naturally completes awaitTurnCompleted().
         await this.interruptSessionTurn(sessionState, "Cancel", false);
     }
+}
+
+// fork: replay order for userMessage content inputs — images first, then
+// everything else in its original relative order (Array.prototype.sort is
+// stable, so non-image inputs keep their rollout sequence).
+function userInputReplayOrder(input: UserInput): number {
+    return input.type === "image" || input.type === "localImage" ? 0 : 1;
+}
+
+// fork: inverse of buildPromptItems' imageDataUrl (`data:<mime>;base64,<data>`).
+function parseImageDataUrl(url: string): { data: string; mimeType: string } | null {
+    const match = /^data:(image\/[a-z0-9.+-]+);base64,(.+)$/is.exec(url);
+    if (!match || !match[1] || !match[2]) {
+        return null;
+    }
+    return { data: match[2], mimeType: match[1] };
 }
 
 export function mergeHistoryUpdates(
