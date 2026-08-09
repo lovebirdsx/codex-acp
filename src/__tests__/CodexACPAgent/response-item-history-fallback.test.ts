@@ -233,6 +233,121 @@ describe("ResponseItemHistoryFallback", () => {
 
         expect(updates).toBeNull();
     });
+
+    // Real rollout pair from a live request_user_input turn (the elicitation
+    // itself is never persisted as an event_msg — only these response_items).
+    it("replays request_user_input as a readable question card with the user's answer", () => {
+        const updates = parseResponseItemHistoryFallback(jsonl([
+            userInputCall("call-ask", [{
+                header: "数学选择题",
+                id: "answer",
+                options: [
+                    { label: "A. 12", description: "选择选项 A" },
+                    { label: "B. 15", description: "选择选项 B" },
+                    { label: "C. 18", description: "选择选项 C" },
+                ],
+                question: "若 3x + 6 = 24，则 x 等于多少？",
+            }]),
+            userInputCallOutput("call-ask", { answers: { answer: { answers: ["6"] } } }),
+        ]), "terminal_output");
+
+        const toolCalls = (updates ?? []).filter((u) => u.sessionUpdate === "tool_call");
+        expect(toolCalls).toHaveLength(1);
+        expect(toolCalls[0]).toMatchObject({
+            toolCallId: "call-ask",
+            kind: "other",
+            title: "若 3x + 6 = 24，则 x 等于多少？",
+            status: "in_progress",
+        });
+        const questionText = toolCallText(toolCalls[0]!);
+        expect(questionText).toContain("若 3x + 6 = 24，则 x 等于多少？");
+        expect(questionText).toContain("A. 12");
+        expect(questionText).toContain("B. 15");
+        expect(questionText).toContain("C. 18");
+
+        const toolUpdates = (updates ?? []).filter((u) => u.sessionUpdate === "tool_call_update");
+        expect(toolUpdates).toHaveLength(1);
+        expect(toolUpdates[0]).toMatchObject({ toolCallId: "call-ask", status: "completed" });
+        const answerText = toolCallUpdateText(toolUpdates[0]!);
+        expect(answerText).toContain("若 3x + 6 = 24，则 x 等于多少？");
+        expect(answerText).toContain("**答案**：6");
+    });
+
+    it("renders a selected option folded with its Other note verbatim", () => {
+        const updates = parseResponseItemHistoryFallback(jsonl([
+            userInputCall("call-ask", [{
+                header: "数学选择题",
+                id: "math_answer",
+                options: [
+                    { label: "8", description: "计算结果。" },
+                    { label: "4", description: "计算结果。" },
+                ],
+                question: "f(5) 的值是？",
+            }]),
+            // Live, the fork folds a typed note onto the picked option as
+            // "<label>（补充：<note>）" — replay must surface both parts.
+            userInputCallOutput("call-ask", { answers: { math_answer: { answers: ["8（补充：为什么？）"] } } }),
+        ]), "terminal_output");
+
+        const answerText = toolCallUpdateText(
+            (updates ?? []).find((u) => u.sessionUpdate === "tool_call_update")!,
+        );
+        expect(answerText).toContain("**答案**：8（补充：为什么？）");
+    });
+
+    it("titles a multi-question request_user_input card and maps answers per question id", () => {
+        const updates = parseResponseItemHistoryFallback(jsonl([
+            userInputCall("call-ask", [
+                {
+                    header: "Next step",
+                    id: "next_step",
+                    options: [{ label: "Run tests", description: "Run the suite." }],
+                    question: "What should I do next?",
+                },
+                {
+                    header: "Notes",
+                    id: "notes",
+                    options: null,
+                    question: "Any extra instructions?",
+                },
+            ]),
+            userInputCallOutput("call-ask", {
+                answers: {
+                    next_step: { answers: ["Inspect flaky logs"] },
+                },
+            }),
+        ]), "terminal_output");
+
+        const toolCalls = (updates ?? []).filter((u) => u.sessionUpdate === "tool_call");
+        expect(toolCalls).toHaveLength(1);
+        expect(toolCalls[0]).toMatchObject({ title: "Input requested" });
+
+        const answerText = toolCallUpdateText(
+            (updates ?? []).find((u) => u.sessionUpdate === "tool_call_update")!,
+        );
+        expect(answerText).toContain("**答案**：Inspect flaky logs");
+        expect(answerText).toContain("（跳过）");
+    });
+
+    it("falls back to the generic output update when the answers payload is unparseable", () => {
+        const updates = parseResponseItemHistoryFallback(jsonl([
+            userInputCall("call-ask", [{
+                header: "Q",
+                id: "answer",
+                options: null,
+                question: "Pick one?",
+            }]),
+            functionCallOutput("call-ask", "not-json"),
+        ]), "terminal_output");
+
+        const toolUpdates = (updates ?? []).filter((u) => u.sessionUpdate === "tool_call_update");
+        expect(toolUpdates).toHaveLength(1);
+        expect(toolUpdates[0]).toMatchObject({
+            toolCallId: "call-ask",
+            status: "completed",
+            rawOutput: { output: "not-json" },
+        });
+    });
 });
 
 function jsonl(records: unknown[]): string {
@@ -408,4 +523,56 @@ function toolCallTitles(
 function toolCallUsesTerminal(updates: UpdateSessionEvent[] | null, toolCallId: string): boolean {
     const start = toolCallStarts(updates).find((update) => update.toolCallId === toolCallId);
     return (start?.content ?? []).some((content) => content.type === "terminal");
+}
+
+type UserInputQuestionFixture = {
+    header: string;
+    id: string;
+    options: Array<{ label: string; description: string }> | null;
+    question: string;
+};
+
+function userInputCall(callId: string, questions: UserInputQuestionFixture[]): unknown {
+    return {
+        type: "response_item",
+        payload: {
+            type: "function_call",
+            name: "request_user_input",
+            arguments: JSON.stringify({ questions }),
+            call_id: callId,
+        },
+    };
+}
+
+function userInputCallOutput(callId: string, output: unknown): unknown {
+    return {
+        type: "response_item",
+        payload: {
+            type: "function_call_output",
+            call_id: callId,
+            output: JSON.stringify(output),
+        },
+    };
+}
+
+function toolCallText(update: UpdateSessionEvent): string {
+    if (update.sessionUpdate !== "tool_call") {
+        return "";
+    }
+    return (update.content ?? [])
+        .flatMap((item) => (
+            item.type === "content" && item.content.type === "text" ? [item.content.text] : []
+        ))
+        .join("\n");
+}
+
+function toolCallUpdateText(update: UpdateSessionEvent): string {
+    if (update.sessionUpdate !== "tool_call_update") {
+        return "";
+    }
+    return (update.content ?? [])
+        .flatMap((item) => (
+            item.type === "content" && item.content.type === "text" ? [item.content.text] : []
+        ))
+        .join("\n");
 }

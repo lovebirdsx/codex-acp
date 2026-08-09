@@ -887,4 +887,199 @@ describe("CodexACPAgent - loadSession", () => {
             expect(dump).toContain('MCP server `broken-mcp` failed to start: boom');
         });
     });
+
+    it("replays a request_user_input rollout pair as a readable question card with the answer", async () => {
+        const fixture = createCodexMockTestFixture();
+        const codexAcpAgent = fixture.getCodexAcpAgent();
+        const codexAcpClient = fixture.getCodexAcpClient();
+        const codexAppServerClient = fixture.getCodexAppServerClient();
+        const tempDir = await mkdtemp(join(tmpdir(), "codex-acp-user-input-history-"));
+
+        try {
+            // Real rollout shape: the live elicitation never lands as an
+            // event_msg — only the function_call/function_call_output pair
+            // survives, and thread/resume does not reconstruct the item.
+            const rolloutPath = join(tempDir, "rollout.jsonl");
+            const rolloutRecords = [
+                {
+                    type: "event_msg",
+                    payload: {
+                        type: "user_message",
+                        message: "使用ask_user工具，考我一道数学的选择题。",
+                        images: [],
+                        local_images: [],
+                        text_elements: [],
+                    },
+                },
+                {
+                    type: "response_item",
+                    payload: {
+                        type: "message",
+                        role: "assistant",
+                        content: [{ type: "output_text", text: "我会用交互式提问工具出一道数学选择题。" }],
+                        phase: "commentary",
+                    },
+                },
+                {
+                    type: "response_item",
+                    payload: {
+                        type: "function_call",
+                        name: "request_user_input",
+                        arguments: JSON.stringify({
+                            questions: [{
+                                header: "数学选择题",
+                                id: "answer",
+                                options: [
+                                    { label: "A. 12", description: "选择选项 A" },
+                                    { label: "B. 15", description: "选择选项 B" },
+                                    { label: "C. 18", description: "选择选项 C" },
+                                ],
+                                question: "若 3x + 6 = 24，则 x 等于多少？",
+                            }],
+                        }),
+                        call_id: "call-ask",
+                    },
+                },
+                {
+                    type: "response_item",
+                    payload: {
+                        type: "function_call_output",
+                        call_id: "call-ask",
+                        output: "{\"answers\":{\"answer\":{\"answers\":[\"6\"]}}}",
+                    },
+                },
+                {
+                    type: "response_item",
+                    payload: {
+                        type: "message",
+                        role: "assistant",
+                        content: [{ type: "output_text", text: "你答对了，x = 6。" }],
+                        phase: "final_answer",
+                    },
+                },
+            ];
+            await writeFile(
+                rolloutPath,
+                `${rolloutRecords.map((record) => JSON.stringify(record)).join("\n")}\n`,
+                "utf8",
+            );
+
+            codexAcpClient.authRequired = vi.fn().mockResolvedValue(false);
+            codexAcpClient.getAccount = vi.fn().mockResolvedValue({
+                account: null,
+                requiresOpenaiAuth: false,
+            });
+            codexAcpClient.listSkills = vi.fn().mockResolvedValue({ data: [] });
+
+            const model = createTestModel({ id: "gpt-5.2", displayName: "GPT-5.2" });
+            codexAppServerClient.listModels = vi.fn().mockResolvedValue({
+                data: [model],
+                nextCursor: null,
+            });
+
+            const thread: Thread = {
+                id: "session-user-input",
+                sessionId: "session-user-input",
+                parentThreadId: null,
+                threadSource: null,
+                forkedFromId: null,
+                preview: "使用ask_user工具，考我一道数学的选择题。",
+                ephemeral: false,
+                modelProvider: "openai",
+                createdAt: 123,
+                updatedAt: 124,
+                recencyAt: null,
+                status: { type: "idle" },
+                path: rolloutPath,
+                cwd: "/test/project",
+                cliVersion: "0.145.0",
+                source: "vscode",
+                agentNickname: null,
+                agentRole: null,
+                gitInfo: null,
+                name: null,
+                turns: [
+                    {
+                        id: "turn-1",
+                        itemsView: "full",
+                        status: "completed",
+                        error: null,
+                        startedAt: null,
+                        completedAt: null,
+                        durationMs: null,
+                        items: [
+                            {
+                                type: "userMessage",
+                                id: "item-1",
+                                clientId: null,
+                                content: [{ type: "text", text: "使用ask_user工具，考我一道数学的选择题。", text_elements: [] }],
+                            },
+                            {
+                                type: "agentMessage",
+                                id: "item-2",
+                                text: "我会用交互式提问工具出一道数学选择题。",
+                                phase: "commentary",
+                                memoryCitation: null,
+                            },
+                            {
+                                type: "agentMessage",
+                                id: "item-3",
+                                text: "你答对了，x = 6。",
+                                phase: "final_answer",
+                                memoryCitation: null,
+                            },
+                        ],
+                    },
+                ],
+            };
+
+            codexAppServerClient.threadResume = vi.fn().mockResolvedValue({
+                thread,
+                model: model.id,
+                modelProvider: "openai",
+                cwd: "/test/project",
+                approvalPolicy: "never",
+                sandbox: { type: "dangerFullAccess" },
+                reasoningEffort: model.defaultReasoningEffort,
+            });
+            codexAppServerClient.threadRead = vi.fn().mockResolvedValue({ thread });
+
+            await codexAcpAgent.initialize({ protocolVersion: 1 });
+            await codexAcpAgent.loadSession({
+                sessionId: thread.id,
+                cwd: "/test/project",
+                mcpServers: [],
+            });
+
+            const updates = fixture.getAcpConnectionEvents([])
+                .filter((event) => event.method === "sessionUpdate")
+                .map((event) => event.args[0].update);
+            const commentaryIndex = updates.findIndex((update) => (
+                update.sessionUpdate === "agent_message_chunk"
+                && update.content.type === "text"
+                && update.content.text.includes("交互式提问工具")
+            ));
+            const toolCallIndex = updates.findIndex((update) => update.sessionUpdate === "tool_call");
+            const toolCall = updates[toolCallIndex];
+            expect(toolCall).toMatchObject({
+                toolCallId: "call-ask",
+                kind: "other",
+                title: "若 3x + 6 = 24，则 x 等于多少？",
+            });
+            // The card lands between the commentary message and the final answer.
+            expect(toolCallIndex).toBeGreaterThan(commentaryIndex);
+            const finalAnswerIndex = updates.findIndex((update) => (
+                update.sessionUpdate === "agent_message_chunk"
+                && update.content.type === "text"
+                && update.content.text.includes("你答对了")
+            ));
+            expect(toolCallIndex).toBeLessThan(finalAnswerIndex);
+
+            const toolCallUpdate = updates.find((update) => update.sessionUpdate === "tool_call_update");
+            expect(toolCallUpdate).toMatchObject({ toolCallId: "call-ask", status: "completed" });
+            expect(JSON.stringify(toolCallUpdate)).toContain("**答案**：6");
+        } finally {
+            await rm(tempDir, { recursive: true, force: true });
+        }
+    });
 });

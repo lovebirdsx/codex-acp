@@ -759,7 +759,7 @@ describe('Elicitation Events', () => {
             await promptPromise;
         });
 
-        it('should prefer free-form Other answers over fixed choices', async () => {
+        it('should fold a typed Other note onto the selected option instead of replacing it', async () => {
             const { promptPromise, completeTurn } = await setupSessionWithPendingPromptAndCapabilities({
                 elicitation: { form: {} },
             });
@@ -792,9 +792,116 @@ describe('Elicitation Events', () => {
             const response = await fixture.sendServerRequest('item/tool/requestUserInput', params);
             expect(response).toEqual({
                 answers: {
+                    next_step: { answers: ['Run tests（补充：Inspect flaky logs）'] },
+                },
+            });
+
+            completeTurn();
+            await promptPromise;
+        });
+
+        it('should keep a free-form Other answer as the answer when no option is selected', async () => {
+            const { promptPromise, completeTurn } = await setupSessionWithPendingPromptAndCapabilities({
+                elicitation: { form: {} },
+            });
+            fixture.setElicitationResponse({
+                action: 'accept',
+                content: {
+                    next_step__other: 'Inspect flaky logs',
+                },
+            });
+
+            const params: ToolRequestUserInputParams = {
+                threadId: sessionId,
+                turnId: 'turn-1',
+                itemId: 'request-user-input-1',
+                autoResolutionMs: null,
+                questions: [{
+                    id: 'next_step',
+                    header: 'Next step',
+                    question: 'What should I do next?',
+                    isOther: true,
+                    isSecret: false,
+                    options: [
+                        { label: 'Run tests', description: 'Run the focused test suite.' },
+                        { label: 'Stop', description: 'Stop and report current status.' },
+                    ],
+                }],
+            };
+
+            const response = await fixture.sendServerRequest('item/tool/requestUserInput', params);
+            expect(response).toEqual({
+                answers: {
                     next_step: { answers: ['Inspect flaky logs'] },
                 },
             });
+
+            completeTurn();
+            await promptPromise;
+        });
+
+        it('should publish a question card to the session timeline after the user answers', async () => {
+            const { promptPromise, completeTurn } = await setupSessionWithPendingPromptAndCapabilities({
+                elicitation: { form: {} },
+            });
+            fixture.setElicitationResponse({
+                action: 'accept',
+                content: {
+                    math_answer: '8',
+                    math_answer__other: '为什么？',
+                },
+            });
+
+            const params: ToolRequestUserInputParams = {
+                threadId: sessionId,
+                turnId: 'turn-1',
+                itemId: 'call-ask',
+                autoResolutionMs: null,
+                questions: [{
+                    id: 'math_answer',
+                    header: '数学选择题',
+                    question: 'f(5) 的值是？',
+                    isOther: true,
+                    isSecret: false,
+                    options: [
+                        { label: '8', description: '计算结果。' },
+                        { label: '4', description: '计算结果。' },
+                    ],
+                }],
+            };
+
+            await fixture.sendServerRequest('item/tool/requestUserInput', params);
+
+            const sessionUpdates = fixture.getAcpConnectionEvents([])
+                .filter((event) => event.method === 'sessionUpdate')
+                .map((event) => event.args[0].update);
+            expect(sessionUpdates).toHaveLength(2);
+            expect(sessionUpdates[0]).toMatchObject({
+                sessionUpdate: 'tool_call',
+                toolCallId: 'call-ask',
+                kind: 'other',
+                title: 'f(5) 的值是？',
+                status: 'in_progress',
+            });
+            const questionText = (sessionUpdates[0].content ?? [])
+                .flatMap((item: { type: string; content?: { type: string; text?: string } }) => (
+                    item.type === 'content' && item.content?.type === 'text' ? [item.content.text] : []
+                ))
+                .join('\n');
+            expect(questionText).toContain('f(5) 的值是？');
+            expect(questionText).toContain('- 8');
+            expect(sessionUpdates[1]).toMatchObject({
+                sessionUpdate: 'tool_call_update',
+                toolCallId: 'call-ask',
+                status: 'completed',
+            });
+            const answerText = (sessionUpdates[1].content ?? [])
+                .flatMap((item: { type: string; content?: { type: string; text?: string } }) => (
+                    item.type === 'content' && item.content?.type === 'text' ? [item.content.text] : []
+                ))
+                .join('\n');
+            expect(answerText).toContain('> f(5) 的值是？');
+            expect(answerText).toContain('**答案**：8（补充：为什么？）');
 
             completeTurn();
             await promptPromise;

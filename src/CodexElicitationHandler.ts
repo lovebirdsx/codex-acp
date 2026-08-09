@@ -18,6 +18,11 @@ import {
     clientSupportsFormElicitation,
     clientSupportsUrlElicitation,
 } from "./ElicitationCapabilities";
+import {
+    createUserInputAnswerUpdate,
+    createUserInputToolCallEvent,
+    type UserInputQuestion,
+} from "./ResponseItemHistoryFallback";
 
 // Standard elicitation options (non-tool-call approval).
 const ELICITATION_OPTIONS: acp.PermissionOption[] = [
@@ -250,6 +255,29 @@ function userInputResponseValue(
     return value;
 }
 
+// A typed "Other" note annotates the selected option instead of replacing it —
+// the user picked an option AND added a remark, and both must reach the model
+// (mirrors the claude fork's AskUserQuestion folding). Only with no selection
+// does the text stand alone as the answer.
+function mergeUserInputAnswer(
+    selection: acp.ElicitationContentValue | undefined,
+    otherText: acp.ElicitationContentValue | undefined
+): string[] | undefined {
+    const selected = selection === undefined
+        ? undefined
+        : Array.isArray(selection)
+            ? selection.map(String)
+            : [String(selection)];
+    if (otherText === undefined) {
+        return selected;
+    }
+    const note = String(otherText);
+    if (selected === undefined || selected.length === 0) {
+        return [note];
+    }
+    return [`${selected.join(", ")}（补充：${note}）`];
+}
+
 /**
  * Builds the ACP permission options for an MCP tool call approval elicitation.
  * Always includes "Allow Once"; adds session/always persist options when advertised.
@@ -371,12 +399,49 @@ export class CodexElicitationHandler implements ElicitationHandler {
         try {
             const response = await this.requestUserInputElicitation(params);
             if (response === null) {
+                await this.publishUserInputCard(params, {});
                 return { answers: {} };
             }
-            return this.convertUserInputResponse(response, params);
+            const result = this.convertUserInputResponse(response, params);
+            await this.publishUserInputCard(params, result.answers);
+            return result;
         } catch (error) {
             logger.error("Error handling Codex user input request", error);
             return { answers: {} };
+        }
+    }
+
+    // Live, the app-server never surfaces request_user_input as a thread item,
+    // so the answered question would vanish from the client's timeline when the
+    // elicitation card settles. Emit the same tool_call/tool_call_update pair
+    // the rollout fallback rebuilds on replay (ResponseItemHistoryFallback) so
+    // live and history render identically — the two never coexist in one
+    // timeline (replay rebuilds from the rollout in a fresh session attach).
+    private async publishUserInputCard(
+        params: ToolRequestUserInputParams,
+        answers: ToolRequestUserInputResponse["answers"]
+    ): Promise<void> {
+        const questions: UserInputQuestion[] = params.questions.map((question) => ({
+            id: question.id,
+            question: question.question,
+            options: (question.options ?? []).map((option) => ({
+                label: option.label,
+                description: option.description,
+            })),
+        }));
+        if (questions.length === 0) {
+            return;
+        }
+        await this.connection.notify(acp.methods.client.session.update, {
+            sessionId: this.sessionState.sessionId,
+            update: createUserInputToolCallEvent(params.itemId, questions),
+        });
+        const answerUpdate = createUserInputAnswerUpdate(params.itemId, questions, { answers });
+        if (answerUpdate) {
+            await this.connection.notify(acp.methods.client.session.update, {
+                sessionId: this.sessionState.sessionId,
+                update: answerUpdate,
+            });
         }
     }
 
@@ -698,18 +763,17 @@ export class CodexElicitationHandler implements ElicitationHandler {
         const content = contentRecord(response.content);
         const questionIds = new Set(params.questions.map(question => question.id));
         for (const question of params.questions) {
-            const value = question.isOther && question.options != null && question.options.length > 0
-                ? userInputResponseValue(content, userInputOtherFieldId(question.id, questionIds))
-                    ?? userInputResponseValue(content, question.id)
-                : userInputResponseValue(content, question.id);
+            const hasOtherAnswer = question.isOther && question.options != null && question.options.length > 0;
+            const value = mergeUserInputAnswer(
+                userInputResponseValue(content, question.id),
+                hasOtherAnswer
+                    ? userInputResponseValue(content, userInputOtherFieldId(question.id, questionIds))
+                    : undefined,
+            );
             if (value === undefined) {
                 continue;
             }
-            answers[question.id] = {
-                answers: Array.isArray(value)
-                    ? value.map(String)
-                    : [String(value)],
-            };
+            answers[question.id] = { answers: value };
         }
         return { answers };
     }

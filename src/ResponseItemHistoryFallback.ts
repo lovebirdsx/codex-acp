@@ -25,6 +25,21 @@ type ParsedShellCommand = {
 
 const EXEC_COMMAND_NAMES = new Set(["exec_command", "shell_command"]);
 
+// Live, `request_user_input` surfaces as a form elicitation and the rollout
+// never persists it as an event_msg — only this function_call/output pair
+// survives. thread/resume drops the item too, so replay rebuilds a readable
+// question card here (the generic tool-call path would render an empty
+// "request_user_input" shell with the questions/answers buried in raw JSON).
+const REQUEST_USER_INPUT_TOOL_NAME = "request_user_input";
+
+type UserInputQuestion = {
+    id: string;
+    question: string;
+    options: Array<{ label: string; description: string | null }>;
+};
+
+export type { UserInputQuestion };
+
 // JS REPL internal functions (e.g. `wait`, which polls an exec cell's output) are
 // runtime plumbing: the app-server never exposes them as thread items live, so the
 // fallback must not resurrect them as tool call cards either.
@@ -77,6 +92,7 @@ export function parseResponseItemHistoryFallback(
     const execToolCallIds = new Set<string>();
     const skippedToolCallIds = new Set<string>();
     const emittedToolCallIds = new Set<string>();
+    const userInputQuestions = new Map<string, UserInputQuestion[]>();
     let recoveredMissingToolCall = false;
     let lastUpdateKey: string | null = null;
 
@@ -131,6 +147,14 @@ export function parseResponseItemHistoryFallback(
                 if (toolCallId && emittedToolCallIds.has(toolCallId)) {
                     break;
                 }
+                if (name === REQUEST_USER_INPUT_TOOL_NAME && toolCallId) {
+                    const questions = userInputQuestionsFromArguments(item["arguments"]);
+                    userInputQuestions.set(toolCallId, questions);
+                    recoveredMissingToolCall = true;
+                    emittedToolCallIds.add(toolCallId);
+                    pushUpdates([createUserInputToolCallEvent(toolCallId, questions)]);
+                    break;
+                }
                 const result = createFunctionCallUpdate(item);
                 if (!result) {
                     break;
@@ -183,6 +207,14 @@ export function parseResponseItemHistoryFallback(
                 const toolCallId = stringValue(item["call_id"]);
                 if (toolCallId && skippedToolCallIds.has(toolCallId)) {
                     break;
+                }
+                const questions = toolCallId === null ? undefined : userInputQuestions.get(toolCallId);
+                if (toolCallId && questions) {
+                    const answerUpdate = createUserInputAnswerUpdate(toolCallId, questions, item["output"]);
+                    if (answerUpdate) {
+                        pushUpdates([answerUpdate]);
+                        break;
+                    }
                 }
                 const update = createFunctionCallOutputUpdate(
                     item,
@@ -571,6 +603,110 @@ function parseExecShellResultText(text: string): { output: string; exitCode: num
         output: text.slice(match[0].length),
         exitCode: Number.parseInt(match[1] ?? "", 10),
     };
+}
+
+function userInputQuestionsFromArguments(value: unknown): UserInputQuestion[] {
+    const args = asRecord(parseFunctionArguments(value));
+    const list = args && Array.isArray(args["questions"]) ? args["questions"] : [];
+    return list.flatMap((entry): UserInputQuestion[] => {
+        const record = asRecord(entry);
+        const id = record ? stringValue(record["id"]) : null;
+        const question = record ? stringValue(record["question"]) : null;
+        if (!record || !id || !question) {
+            return [];
+        }
+        const rawOptions = Array.isArray(record["options"]) ? record["options"] : [];
+        const options = rawOptions.flatMap((option): UserInputQuestion["options"] => {
+            const optionRecord = asRecord(option);
+            const label = optionRecord ? stringValue(optionRecord["label"]) : null;
+            if (!label) {
+                return [];
+            }
+            return [{ label, description: optionRecord ? stringValue(optionRecord["description"]) : null }];
+        });
+        return [{ id, question, options }];
+    });
+}
+
+function userInputQuestionText(question: UserInputQuestion): string {
+    const lines = [question.question];
+    for (const option of question.options) {
+        lines.push(option.description ? `- ${option.label} — ${option.description}` : `- ${option.label}`);
+    }
+    return lines.join("\n");
+}
+
+// Live, the app-server never surfaces request_user_input as a thread item, so
+// CodexElicitationHandler re-emits these same two events once the user answers
+// — keep the card rendering shared between the live and replay paths.
+export function createUserInputToolCallEvent(
+    toolCallId: string,
+    questions: UserInputQuestion[],
+): AcpToolCallEvent {
+    const first = questions[0];
+    return {
+        sessionUpdate: "tool_call",
+        toolCallId,
+        kind: "other",
+        title: questions.length === 1 && first ? first.question : "Input requested",
+        status: "in_progress",
+        content: questions.map((question) => ({
+            type: "content",
+            content: { type: "text", text: userInputQuestionText(question) },
+        })),
+    };
+}
+
+// Answer sections mirror the claude fork's AskUserQuestion replay rendering
+// (quoted question, then the bold answer) so both agents' history cards look alike.
+// `output` accepts either the rollout's JSON string or the live answers object
+// (`{ answers: { [questionId]: { answers: [...] } } }`) — both parse through
+// userInputAnswersFromOutput.
+export function createUserInputAnswerUpdate(
+    toolCallId: string,
+    questions: UserInputQuestion[],
+    output: unknown,
+): UpdateSessionEvent | null {
+    const answers = userInputAnswersFromOutput(output);
+    if (!answers || questions.length === 0) {
+        return null;
+    }
+    const text = questions.map((question) => {
+        const picked = answers.get(question.id) ?? [];
+        return [
+            `> ${question.question}`,
+            `**答案**：${picked.length > 0 ? picked.join(", ") : "（跳过）"}`,
+        ].join("\n");
+    }).join("\n\n");
+    return {
+        sessionUpdate: "tool_call_update",
+        toolCallId,
+        status: "completed",
+        content: [{ type: "content", content: { type: "text", text } }],
+    };
+}
+
+function userInputAnswersFromOutput(output: unknown): Map<string, string[]> | null {
+    let value: unknown = output;
+    if (typeof value === "string") {
+        try {
+            value = JSON.parse(value);
+        } catch {
+            return null;
+        }
+    }
+    const record = asRecord(value);
+    const answers = record ? asRecord(record["answers"]) : null;
+    if (!answers) {
+        return null;
+    }
+    const result = new Map<string, string[]>();
+    for (const [id, entry] of Object.entries(answers)) {
+        const entryRecord = asRecord(entry);
+        const list = entryRecord && Array.isArray(entryRecord["answers"]) ? entryRecord["answers"] : [];
+        result.set(id, list.filter((answer): answer is string => typeof answer === "string"));
+    }
+    return result;
 }
 
 function createFunctionCallUpdate(item: JsonRecord): LegacyFunctionCallUpdate | null {    const toolCallId = stringValue(item["call_id"]);
