@@ -27,6 +27,11 @@ import {AcpToolCallRenderer} from "./tool-calls/AcpToolCallRenderer";
 import {ElicitationReporter} from "./tool-calls/reporters/ElicitationReporter";
 import {isRecord, normalizeJsonObject, normalizeJsonValue, recordOrNull} from "./permissions/json";
 import {AIR_CUSTOM_ANSWER_KEY, LEGACY_AIR_CUSTOM_ANSWER_KEY, isAirClient, withAirMeta} from "./AirExtension";
+import {
+    createUserInputAnswerUpdate,
+    createUserInputToolCallEvent,
+    type UserInputQuestion,
+} from "./RequestUserInputHistory";
 type AcpBackedMcpElicitationParams = Extract<
     McpServerElicitationRequestParams,
     { mode: "form" } | { mode: "url" }
@@ -149,6 +154,54 @@ function userInputResponseValue(
     return value;
 }
 
+function userInputAnswersFromValue(value: acp.ElicitationContentValue): string[] {
+    return Array.isArray(value) ? value.map(String) : [String(value)];
+}
+
+/** The note entries of a submitted form field, trimmed, in submission order. */
+function userInputNoteTexts(note: acp.ElicitationContentValue | undefined): string[] {
+    return note === undefined
+        ? []
+        : userInputAnswersFromValue(note).map(text => text.trim()).filter(text => text.length > 0);
+}
+
+/*
+ * fork: the fork has always folded a note onto the option the user picked
+ * (`<option>（补充：<note>）`) instead of sending it as a separate answer, and the editor
+ * renders exactly that. AIR reads the upstream `None of the above` + `user_note:` convention
+ * itself, so AIR keeps the upstream answers untouched; every other client keeps the fold.
+ */
+function foldedUserInputAnswers(
+    value: acp.ElicitationContentValue | undefined,
+    note: acp.ElicitationContentValue | undefined,
+): string[] {
+    const selected = value === undefined ? [] : userInputAnswersFromValue(value);
+    const notes = userInputNoteTexts(note);
+    if (notes.length === 0) {
+        return selected;
+    }
+    const picked = value === USER_INPUT_OTHER_OPTION ? [] : selected;
+    return picked.length === 0 ? notes : [`${picked.join(", ")}（补充：${notes.join(", ")}）`];
+}
+
+/** AIR's own answer convention: the note is a separate `user_note:` entry, and an own answer replaces the choice. */
+function airUserInputAnswers(
+    question: ToolRequestUserInputParams["questions"][number],
+    hasOtherAnswer: boolean,
+    value: acp.ElicitationContentValue | undefined,
+    note: acp.ElicitationContentValue | undefined,
+): string[] {
+    const answerValues: string[] = [];
+    const typedAnswer = hasOtherAnswer ? typedChoiceAnswer(value, question) : undefined;
+    if (typedAnswer !== undefined) {
+        answerValues.push(USER_INPUT_OTHER_OPTION, `${USER_INPUT_NOTE_PREFIX}${typedAnswer.trim()}`);
+    } else if (value !== undefined) {
+        answerValues.push(...userInputAnswersFromValue(value));
+    }
+    answerValues.push(...userInputNoteTexts(note).map(text => `${USER_INPUT_NOTE_PREFIX}${text}`));
+    return answerValues;
+}
+
 export class CodexElicitationHandler implements ElicitationHandler {
     private readonly connection: AcpClientConnection;
     private readonly renderer: AcpToolCallRenderer;
@@ -268,12 +321,54 @@ export class CodexElicitationHandler implements ElicitationHandler {
         try {
             const response = await this.requestUserInputElicitation(params);
             if (response === null) {
+                await this.publishUserInputCard(params, {});
                 return { answers: {} };
             }
-            return this.convertUserInputResponse(response, params);
+            const result = this.convertUserInputResponse(response, params);
+            await this.publishUserInputCard(params, result.answers);
+            return result;
         } catch (error) {
             logger.error("Error handling Codex user input request", error);
             return { answers: {} };
+        }
+    }
+
+    /*
+     * fork: live, the app-server never surfaces request_user_input as a thread
+     * item — only the elicitation card exists, and it settles once answered, so
+     * the question and the answer would vanish from the client's timeline.
+     * Re-emit them as the same tool_call/tool_call_update pair the replay path
+     * renders, keeping the live session's trace self-contained. (The old
+     * rollout-based replay rebuilt this pair on resume; upstream's typed-item
+     * history carries neither the questions nor the answers, so only this live
+     * path remains.)
+     */
+    private async publishUserInputCard(
+        params: ToolRequestUserInputParams,
+        answers: ToolRequestUserInputResponse["answers"]
+    ): Promise<void> {
+        const questions: UserInputQuestion[] = params.questions.map((question) => ({
+            id: question.id,
+            question: question.question,
+            options: (question.options ?? []).map((option) => ({
+                label: option.label,
+                description: option.description,
+            })),
+        }));
+        if (questions.length === 0) {
+            return;
+        }
+        // The subagent routing rewrites threadId to the ACP session id.
+        await this.connection.notify(acp.methods.client.session.update, {
+            sessionId: params.threadId,
+            update: createUserInputToolCallEvent(params.itemId, questions),
+        });
+        const answerUpdate = createUserInputAnswerUpdate(params.itemId, questions, { answers });
+        if (answerUpdate) {
+            await this.connection.notify(acp.methods.client.session.update, {
+                sessionId: params.threadId,
+                update: answerUpdate,
+            });
         }
     }
 
@@ -541,22 +636,14 @@ export class CodexElicitationHandler implements ElicitationHandler {
         const questionIds = new Set(params.questions.map(question => question.id));
         const airClient = isAirClient(this.clientCapabilities);
         for (const question of params.questions) {
-            const answerValues: string[] = [];
             const hasOtherAnswer = question.isOther && question.options != null && question.options.length > 0;
             const value = userInputResponseValue(content, question.id);
-            const typedAnswer = airClient && hasOtherAnswer ? typedChoiceAnswer(value, question) : undefined;
-            if (typedAnswer !== undefined) {
-                answerValues.push(USER_INPUT_OTHER_OPTION, `${USER_INPUT_NOTE_PREFIX}${typedAnswer.trim()}`);
-            } else if (value !== undefined) {
-                answerValues.push(...(Array.isArray(value) ? value.map(String) : [String(value)]));
-            }
-            if (hasOtherAnswer) {
-                const note = userInputResponseValue(content, userInputNoteFieldId(question.id, questionIds));
-                if (note !== undefined) {
-                    const notes = Array.isArray(note) ? note : [note];
-                    answerValues.push(...notes.map(item => `${USER_INPUT_NOTE_PREFIX}${String(item).trim()}`));
-                }
-            }
+            const note = hasOtherAnswer
+                ? userInputResponseValue(content, userInputNoteFieldId(question.id, questionIds))
+                : undefined;
+            const answerValues = airClient
+                ? airUserInputAnswers(question, hasOtherAnswer, value, note)
+                : foldedUserInputAnswers(value, note);
             if (answerValues.length === 0) {
                 continue;
             }

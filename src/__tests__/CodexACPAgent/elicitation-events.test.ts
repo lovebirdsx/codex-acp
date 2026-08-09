@@ -1,7 +1,7 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import * as acp from "@agentclientprotocol/sdk";
 import type { McpServerElicitationRequestParams, ToolRequestUserInputParams } from '../../app-server/v2';
-import { createCodexMockTestFixture, createTestSessionState, type CodexMockTestFixture } from '../acp-test-utils';
+import { createArrayDump, createCodexMockTestFixture, createTestSessionState, type CodexMockTestFixture } from '../acp-test-utils';
 import type { SessionState } from '../../CodexAcpServer';
 import { AgentMode } from "../../AgentMode";
 import { McpApprovalOptionId } from "../../permissions/option-ids";
@@ -10,6 +10,15 @@ import type { ServerNotification } from "../../app-server";
 describe('Elicitation Events', () => {
     let fixture: CodexMockTestFixture;
     const sessionId = 'test-session-id';
+
+    /**
+     * fork: an answered request_user_input appends its timeline card as tool_call/tool_call_update
+     * session updates. Those are asserted by the fork's own card test, so the dump snapshots of
+     * the elicitation request keep filtering them out.
+     */
+    function elicitationDump(): string {
+        return createArrayDump(fixture.getAcpConnectionEvents([]).filter((event) => event.method !== 'sessionUpdate'), []);
+    }
 
     beforeEach(() => {
         fixture = createCodexMockTestFixture();
@@ -904,7 +913,9 @@ describe('Elicitation Events', () => {
                 },
             });
 
-            expect(fixture.getAcpConnectionEvents([])).toEqual([{
+            // fork: the answered question card trails the request as tool_call/tool_call_update
+            // session updates, so only the request itself is compared here.
+            expect(fixture.getAcpConnectionEvents([]).filter(event => event.method !== 'sessionUpdate')).toEqual([{
                 method: 'createElicitation',
                 args: [{
                     sessionId,
@@ -959,7 +970,7 @@ describe('Elicitation Events', () => {
             await promptPromise;
         });
 
-        it('should return the Other choice and its note using Codex answer conventions', async () => {
+        it('should answer a non-AIR client with the note alone when no option is picked', async () => {
             const { promptPromise, completeTurn } = await setupSessionWithPendingPromptAndCapabilities({
                 elicitation: { form: {} },
             });
@@ -991,9 +1002,12 @@ describe('Elicitation Events', () => {
             };
 
             const response = await fixture.sendServerRequest('item/tool/requestUserInput', params);
+            // fork: non-AIR clients keep the fork's fold — `None of the above` is the empty
+            // selection, so the note stands alone as the answer instead of the upstream
+            // `None of the above` + `user_note:` pair.
             expect(response).toEqual({
                 answers: {
-                    next_step: { answers: ['None of the above', 'user_note: Inspect flaky logs'] },
+                    next_step: { answers: ['Inspect flaky logs'] },
                 },
             });
 
@@ -1037,7 +1051,7 @@ describe('Elicitation Events', () => {
             expect(response).toEqual({
                 answers: { next_step: { answers: expected } },
             });
-            await expect(fixture.getAcpConnectionDump([])).toMatchFileSnapshot(
+            await expect(elicitationDump()).toMatchFileSnapshot(
                 'data/elicitation-user-input-air-custom-answer.json',
             );
 
@@ -1100,14 +1114,16 @@ describe('Elicitation Events', () => {
                 };
 
                 const response = await fixture.sendServerRequest('item/tool/requestUserInput', params);
+                // fork: a non-AIR client's note folds onto the picked option, the way the
+                // editor renders it, instead of the upstream `user_note:` answer entry.
                 expect(response).toEqual({
                     answers: {
-                        choice: { answers: ['Run tests', 'user_note: Run the focused suite first'] },
+                        choice: { answers: ['Run tests（补充：Run the focused suite first）'] },
                         choice_note: { answers: ['Follow project conventions'] },
                         choice_note1: { answers: ['Private context'] },
                     },
                 });
-                await expect(fixture.getAcpConnectionDump([])).toMatchFileSnapshot(
+                await expect(elicitationDump()).toMatchFileSnapshot(
                     `data/elicitation-user-input-note-collision-${order}.json`,
                 );
 
@@ -1151,9 +1167,79 @@ describe('Elicitation Events', () => {
             const [elicitationEvent] = fixture.getAcpConnectionEvents([]);
             const options = elicitationEvent!.args[0].requestedSchema.properties.next_step.oneOf;
             expect(options.filter((option: { const: string }) => option.const === 'None of the above')).toHaveLength(1);
-            await expect(fixture.getAcpConnectionDump([])).toMatchFileSnapshot(
+            await expect(elicitationDump()).toMatchFileSnapshot(
                 'data/elicitation-user-input-existing-other.json',
             );
+
+            completeTurn();
+            await promptPromise;
+        });
+
+        it('should publish a question card to the session timeline after the user answers', async () => {
+            const { promptPromise, completeTurn } = await setupSessionWithPendingPromptAndCapabilities({
+                elicitation: { form: {} },
+            });
+            fixture.setElicitationResponse({
+                action: 'accept',
+                content: {
+                    math_answer: '8',
+                    math_answer_note: '为什么？',
+                },
+            });
+
+            const params: ToolRequestUserInputParams = {
+                threadId: sessionId,
+                turnId: 'turn-1',
+                itemId: 'call-ask',
+                autoResolutionMs: null,
+                isBlocking: true,
+                questions: [{
+                    id: 'math_answer',
+                    header: '数学选择题',
+                    question: 'f(5) 的值是？',
+                    isOther: true,
+                    isSecret: false,
+                    options: [
+                        { label: '8', description: '计算结果。' },
+                        { label: '4', description: '计算结果。' },
+                    ],
+                }],
+            };
+
+            await fixture.sendServerRequest('item/tool/requestUserInput', params);
+
+            const sessionUpdates = fixture.getAcpConnectionEvents([])
+                .filter(event => event.method === 'sessionUpdate')
+                .map(event => event.args[0].update);
+            // fork: the answered elicitation card leaves no trace of its own, so
+            // the handler re-emits the question and the answer as a tool call pair.
+            expect(sessionUpdates).toHaveLength(2);
+            expect(sessionUpdates[0]).toMatchObject({
+                sessionUpdate: 'tool_call',
+                toolCallId: 'call-ask',
+                kind: 'other',
+                title: 'f(5) 的值是？',
+                status: 'in_progress',
+            });
+            const cardText = (sessionUpdates[0]?.content ?? [])
+                .flatMap((item: { type: string; content?: { type: string; text?: string } }) => (
+                    item.type === 'content' && item.content?.type === 'text' ? [item.content.text] : []
+                ))
+                .join('\n');
+            expect(cardText).toContain('f(5) 的值是？');
+            expect(cardText).toContain('- 8');
+            expect(sessionUpdates[1]).toMatchObject({
+                sessionUpdate: 'tool_call_update',
+                toolCallId: 'call-ask',
+                status: 'completed',
+            });
+            const answerText = (sessionUpdates[1]?.content ?? [])
+                .flatMap((item: { type: string; content?: { type: string; text?: string } }) => (
+                    item.type === 'content' && item.content?.type === 'text' ? [item.content.text] : []
+                ))
+                .join('\n');
+            expect(answerText).toContain('> f(5) 的值是？');
+            expect(answerText).toContain('8（补充：为什么？）');
 
             completeTurn();
             await promptPromise;
