@@ -232,3 +232,122 @@ describe('_session/steering', () => {
         expect(turnSteerSpy).not.toHaveBeenCalled();
     });
 });
+
+describe('session/prompt during an active turn', () => {
+    beforeEach(() => {
+        vi.clearAllMocks();
+    });
+
+    it('routes a mid-turn prompt through steering instead of starting a rival turn', async () => {
+        const {mockFixture, sessionState, turnCompleted} = startActiveTurn();
+        const turnSteerSpy = vi.spyOn(mockFixture.getCodexAppServerClient(), "turnSteer")
+            .mockResolvedValue({turnId: "turn-id"});
+        const turnStartSpy = vi.spyOn(mockFixture.getCodexAppServerClient(), "turnStart");
+
+        const firstPrompt = mockFixture.getCodexAcpAgent().prompt({
+            sessionId: "session-id",
+            prompt: [{type: "text", text: "long running prompt"}],
+        });
+        await vi.waitFor(() => {
+            expect(sessionState.currentTurnId).toBe("turn-id");
+        });
+        expect(turnStartSpy).toHaveBeenCalledTimes(1);
+
+        const secondPrompt = mockFixture.getCodexAcpAgent().prompt({
+            sessionId: "session-id",
+            prompt: [{type: "text", text: "steer the running turn"}],
+        });
+
+        await vi.waitFor(() => {
+            expect(turnSteerSpy).toHaveBeenCalledWith({
+                threadId: "session-id",
+                expectedTurnId: "turn-id",
+                input: [{type: "text", text: "steer the running turn", text_elements: []}],
+            });
+        });
+        expect(turnStartSpy).toHaveBeenCalledTimes(1);
+        expect(sessionState.currentTurnId).toBe("turn-id");
+
+        turnCompleted.resolve({
+            threadId: "session-id",
+            turn: createTurn("turn-id", "completed"),
+        });
+        await expect(firstPrompt).resolves.toMatchObject({stopReason: "end_turn"});
+        await expect(secondPrompt).resolves.toEqual({stopReason: "end_turn"});
+    });
+
+    it('starts a new turn when the tracked turn ends before the steer lands', async () => {
+        const {mockFixture, sessionState, turnCompleted} = startActiveTurn();
+        const nextTurnCompleted = deferred<TurnCompletedNotification>();
+        const turnStartSpy = vi.spyOn(mockFixture.getCodexAppServerClient(), "turnStart")
+            .mockResolvedValueOnce({turn: createTurn("turn-id", "inProgress")})
+            .mockResolvedValueOnce({turn: createTurn("new-turn-id", "inProgress")});
+        vi.spyOn(mockFixture.getCodexAppServerClient(), "awaitTurnCompleted")
+            .mockReturnValueOnce(turnCompleted.promise)
+            .mockReturnValueOnce(nextTurnCompleted.promise);
+        vi.spyOn(mockFixture.getCodexAppServerClient(), "turnSteer").mockImplementation(async () => {
+            turnCompleted.resolve({
+                threadId: "session-id",
+                turn: createTurn("turn-id", "completed"),
+            });
+            throw Object.assign(new Error("Internal error"), {
+                data: {details: "no active turn to steer"},
+            });
+        });
+
+        const firstPrompt = mockFixture.getCodexAcpAgent().prompt({
+            sessionId: "session-id",
+            prompt: [{type: "text", text: "long running prompt"}],
+        });
+        await vi.waitFor(() => {
+            expect(sessionState.currentTurnId).toBe("turn-id");
+        });
+
+        const secondPrompt = mockFixture.getCodexAcpAgent().prompt({
+            sessionId: "session-id",
+            prompt: [{type: "text", text: "racing follow-up"}],
+        });
+
+        await expect(firstPrompt).resolves.toMatchObject({stopReason: "end_turn"});
+        await vi.waitFor(() => {
+            expect(turnStartSpy).toHaveBeenCalledTimes(2);
+        });
+
+        nextTurnCompleted.resolve({
+            threadId: "session-id",
+            turn: createTurn("new-turn-id", "completed"),
+        });
+        await expect(secondPrompt).resolves.toEqual({stopReason: "end_turn"});
+    });
+
+    it('propagates steering validation errors to the caller', async () => {
+        const {mockFixture, sessionState, turnCompleted} = startActiveTurn({supportedInputModalities: ["text"]});
+
+        const firstPrompt = mockFixture.getCodexAcpAgent().prompt({
+            sessionId: "session-id",
+            prompt: [{type: "text", text: "long running prompt"}],
+        });
+        await vi.waitFor(() => {
+            expect(sessionState.currentTurnId).toBe("turn-id");
+        });
+        const image: acp.ContentBlock = {
+            type: "image",
+            mimeType: "image/png",
+            data: "abc123",
+        };
+
+        const error = await mockFixture.getCodexAcpAgent().prompt({
+            sessionId: "session-id",
+            prompt: [image],
+        }).catch((err: unknown) => err);
+
+        expect(error).toBeInstanceOf(RequestError);
+        expect((error as RequestError).data).toContain("does not support image input");
+
+        turnCompleted.resolve({
+            threadId: "session-id",
+            turn: createTurn("turn-id", "completed"),
+        });
+        await expect(firstPrompt).resolves.toMatchObject({stopReason: "end_turn"});
+    });
+});
