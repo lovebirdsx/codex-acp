@@ -1109,6 +1109,60 @@ export class CodexAcpServer {
         });
     }
 
+    /**
+     * Handles a `session/prompt` that arrives while another prompt is still
+     * running on the same session (mid-turn steering from clients that send a
+     * plain prompt instead of the `_session/steering` ext-method, e.g. the
+     * universe-editor ACP client).
+     *
+     * Fork addition: taking the normal prompt path here would clear the
+     * tracked turn id and issue a second `turn/start`, whose turn id Codex
+     * never completes (the app-server folds the input into the already
+     * running turn). The prompt's `awaitTurnCompleted` would then never
+     * resolve, leaving the client's session stuck in "running" forever.
+     * Instead the prompt is delivered through the steering pipeline, which
+     * serialises it against any other steer in flight and injects it into the
+     * live turn via `turn/steer` (or starts a fresh turn when the previous
+     * one has just ended).
+     *
+     * Outcome mapping:
+     * - "injected": the input joined the running turn, so this prompt settles
+     *   together with the prompt that owns the turn — await its completion
+     *   and report `end_turn`, matching how the Claude fork settles mid-turn
+     *   prompts once the turn goes idle.
+     * - "startedNewTurn": the turn had just ended and the steering queue
+     *   opened a new one through a nested `prompt()` call, so `activePrompts`
+     *   now holds that new prompt; await its completion. The
+     *   `?? runningPrompt` fallback covers the window before the nested
+     *   prompt has been tracked (and is what the "injected" case reads).
+     * - "failed": surface an error so the client takes its error path.
+     *
+     * `RequestError`s thrown by the steering pipeline itself (e.g. image
+     * input on a text-only model) propagate to the caller unchanged.
+     *
+     * Recursion is safe: `startNewTurnFromSteering` awaits the previous
+     * prompt's completion (which removes it from `activePrompts`) before
+     * calling `prompt()`, so the nested call never re-enters this branch.
+     */
+    private async promptViaSteering(
+        params: acp.PromptRequest,
+        runningPrompt: ActivePrompt,
+    ): Promise<acp.PromptResponse> {
+        logger.log("Prompt received while another prompt is running; routing through steering", {
+            sessionId: params.sessionId,
+        });
+        const result = await this.executeOrQueueSteeringRequest({
+            sessionId: params.sessionId,
+            prompt: params.prompt,
+        });
+        if (result.outcome === "failed") {
+            throw RequestError.internalError(`Mid-turn prompt for session ${params.sessionId} could not be delivered`);
+        }
+        const activePrompt = this.activePrompts.get(params.sessionId) ?? runningPrompt;
+        await activePrompt.completion;
+        return {stopReason: "end_turn"};
+    }
+
     private isNoActiveTurnToSteerError(error: unknown): boolean {
         const messages = error instanceof Error ? [error.message] : [];
         if (typeof error === "object" && error !== null && "data" in error) {
@@ -2011,6 +2065,12 @@ export class CodexAcpServer {
             prompt: params.prompt,
         });
         const sessionState = this.getSessionState(params.sessionId);
+        // Fork: a prompt arriving while another prompt is still running on this
+        // session must not take the normal path — see promptViaSteering.
+        const runningPrompt = this.activePrompts.get(params.sessionId);
+        if (runningPrompt) {
+            return await this.promptViaSteering(params, runningPrompt);
+        }
         sessionState.currentTurnId = null;
         sessionState.lastTokenUsage = null;
         const activePrompt = this.trackActivePrompt(params.sessionId);
