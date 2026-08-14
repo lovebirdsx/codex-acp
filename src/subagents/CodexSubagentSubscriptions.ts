@@ -75,7 +75,12 @@ export class CodexSubagentSubscriptions {
                 const eventThreadId = (childEvent.params as {threadId?: unknown}).threadId;
                 if (eventThreadId !== childSessionId) return;
                 this.discover(session, childEvent);
-                if (session.current.supportsSubagents) session.current.dispatch(childEvent);
+                // Fork addition: child token usage always reaches the session
+                // handler so the parent session can price sub-agent work; the
+                // legacy branch below hides every other child notification.
+                if (session.current.supportsSubagents || childEvent.method === "thread/tokenUsage/updated") {
+                    session.current.dispatch(childEvent);
+                }
                 else session.current.enqueueInteraction(this.rootAttributed(childEvent, session.current.rootSessionId));
             });
             // Hidden children keep only root-attributed permission requests.

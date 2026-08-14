@@ -36,6 +36,37 @@ export function toTokenCount(usage: TokenUsageBreakdown): TokenCount {
 }
 
 /**
+ * Adds two token counts field-by-field.
+ */
+export function sumTokenCounts(left: TokenCount, right: TokenCount): TokenCount {
+    return {
+        totalTokens: left.totalTokens + right.totalTokens,
+        inputTokens: left.inputTokens + right.inputTokens,
+        cachedInputTokens: left.cachedInputTokens + right.cachedInputTokens,
+        outputTokens: left.outputTokens + right.outputTokens,
+        reasoningOutputTokens: left.reasoningOutputTokens + right.reasoningOutputTokens,
+    };
+}
+
+/**
+ * Aggregates the main-thread cumulative usage with every sub-agent thread's
+ * latest snapshot. Sub-agent threads each report their own cumulative
+ * `thread/tokenUsage/updated` snapshots; folding them into the session total
+ * is what lets the client price sub-agent work. Returns null when there is no
+ * usage at all (main thread included).
+ */
+export function aggregateTokenCounts(
+    primary: TokenCount | null,
+    subagents: Iterable<TokenCount>,
+): TokenCount | null {
+    let result = primary;
+    for (const subagent of subagents) {
+        result = result == null ? subagent : sumTokenCounts(result, subagent);
+    }
+    return result;
+}
+
+/**
  * Maps our per-turn token breakdown to ACP PromptResponse usage fields.
  * Cached input tokens are reported as ACP cache reads, and reasoning output
  * tokens are exposed through ACP's thoughtTokens field.

@@ -32,7 +32,8 @@ import type {
     TurnPlanUpdatedNotification,
     WarningNotification
 } from "./app-server/v2";
-import {toTokenCount} from "./TokenCount";
+import {aggregateTokenCounts, toTokenCount} from "./TokenCount";
+import type {TokenCount} from "./TokenCount";
 import { stripShellPrefix } from "./CommandUtils";
 import {AcpToolCallRenderer} from "./tool-calls/AcpToolCallRenderer";
 import {CommandReporter} from "./tool-calls/reporters/CommandReporter";
@@ -232,6 +233,11 @@ export class CodexEventHandler {
     private readonly subagents: CodexSubagentEventRouter;
     /** Connection-level `authStatus` sink; the app-server account push feeds it. */
     private readonly onAccountUpdated: ((notification: AccountUpdatedNotification) => void) | undefined;
+    /*
+     * Fork addition: the legacy sub-agent card a thread's token usage is
+     * stamped onto (`_universe/subagentStats`). Keyed by app-server thread id.
+     */
+    private readonly subagentActivityItemByThreadId = new Map<string, string>();
 
     /*
      * Fork addition: liveness probe state. `probeLiveness` is injected as a
@@ -623,6 +629,12 @@ export class CodexEventHandler {
                 this.sessionState.toolCallReports.releaseOpen(this.subagents.notificationSessionId(notification));
                 return null;
             case "thread/tokenUsage/updated":
+                if (notification.params.threadId !== this.sessionState.sessionId) {
+                    // Fork addition: a sub-agent thread's snapshot feeds the session
+                    // aggregate instead of the main thread's context occupancy.
+                    await this.handleSubagentTokenUsage(notification.params.threadId, notification.params);
+                    return null;
+                }
                 return this.createUsageUpdate(notification.params);
             case "thread/name/updated":
                 this.sessionState.sessionTitle = normalizeSessionTitle(notification.params.threadName);
@@ -897,6 +909,7 @@ export class CodexEventHandler {
                     )
                     : this.renderer.render(CompactionReporter.started(event.item));
             case "subAgentActivity":
+                this.recordSubagentThread(event.item.agentThreadId, event.item.id);
                 return this.renderer.render(this.subagents.legacyActivityStarted(event.item));
             case "sleep":
             case "functionCallOutput":
@@ -953,6 +966,7 @@ export class CodexEventHandler {
                     )
                     : this.renderer.render(CompactionReporter.completed(event.item));
             case "subAgentActivity":
+                this.recordSubagentThread(event.item.agentThreadId, event.item.id);
                 return this.renderer.render(this.subagents.legacyActivityCompleted(event.item));
             //ignored types
             case "sleep":
@@ -1263,7 +1277,16 @@ export class CodexEventHandler {
 
     private createUsageUpdate(params: ThreadTokenUsageUpdatedNotification): UpdateSessionEvent | null {
         this.handleTokenUsageUpdated(params);
+        return this.createAggregatedUsageUpdate();
+    }
 
+    /*
+     * Fork addition: builds the usage_update from the session's aggregated
+     * token usage (main thread cumulative + every sub-agent thread snapshot).
+     * `used`/`size` stay main-thread only — they describe the main thread's
+     * context occupancy, which sub-agent work does not consume.
+     */
+    private createAggregatedUsageUpdate(): UpdateSessionEvent | null {
         const used = this.sessionState.lastTokenUsage?.totalTokens;
         const size = this.sessionState.modelContextWindow;
         if (used == null || size == null || size <= 0) {
@@ -1274,7 +1297,10 @@ export class CodexEventHandler {
         // emits a usage_update), so clients can price the whole session from the
         // latest snapshot without missing the intermediate calls a single prompt
         // makes. totalTokenUsage carries every call; lastTokenUsage only the last.
-        const total = this.sessionState.totalTokenUsage;
+        const total = aggregateTokenCounts(
+            this.sessionState.totalTokenUsage,
+            this.sessionState.subagentTokenUsage.values(),
+        );
         const modelName = this.sessionState.currentModelId.replace(/\[.*?]$/, "");
         const meta = total != null
             ? {
@@ -1291,6 +1317,63 @@ export class CodexEventHandler {
             size,
             ...(meta != null ? {_meta: meta} : {}),
         };
+    }
+
+    /*
+     * Fork addition: handles a sub-agent thread's token-usage notification.
+     * Child-thread usage reaches this handler through upstream's subagent
+     * routing (native clients) or the client's token-usage forwarding for
+     * clients without native subagent sessions. Only records the snapshot and,
+     * when the main thread has reported usage and a context window, re-emits an
+     * aggregated usage_update plus the per-sub-agent stats on the matching
+     * subAgentActivity card — both on the root session. Never touches turn
+     * state or the main thread's lastTokenUsage.
+     */
+    async handleSubagentTokenUsage(threadId: string, params: ThreadTokenUsageUpdatedNotification): Promise<void> {
+        const tokenCount = toTokenCount(params.tokenUsage.total);
+        this.sessionState.subagentTokenUsage.set(threadId, tokenCount);
+        logger.log("Subagent token usage recorded", {
+            sessionId: this.sessionState.sessionId,
+            threadId,
+            totalTokens: tokenCount.totalTokens,
+        });
+
+        const updates: UpdateSessionEvent[] = [];
+        const usageUpdate = this.createAggregatedUsageUpdate();
+        if (usageUpdate != null) {
+            updates.push(usageUpdate);
+        }
+        const statsUpdate = this.createSubagentStatsUpdate(threadId, tokenCount);
+        if (statsUpdate != null) {
+            updates.push(statsUpdate);
+        }
+        for (const update of updates) {
+            await this.session.update(update);
+        }
+        this.lastForwardedAt = Date.now();
+    }
+
+    private createSubagentStatsUpdate(threadId: string, tokenCount: TokenCount): UpdateSessionEvent | null {
+        const itemId = this.subagentActivityItemByThreadId.get(threadId);
+        if (itemId == null) {
+            return null;
+        }
+        return {
+            sessionUpdate: "tool_call_update",
+            toolCallId: itemId,
+            _meta: {
+                "_universe/subagentStats": {
+                    inputTokens: tokenCount.inputTokens,
+                    outputTokens: tokenCount.outputTokens,
+                    cacheReadTokens: tokenCount.cachedInputTokens,
+                    cacheCreateTokens: 0,
+                },
+            },
+        };
+    }
+
+    private recordSubagentThread(threadId: string, itemId: string): void {
+        this.subagentActivityItemByThreadId.set(threadId, itemId);
     }
 
     private handleRateLimitsUpdated(params: AccountRateLimitsUpdatedNotification): void {
