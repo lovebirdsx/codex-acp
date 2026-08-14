@@ -19,7 +19,7 @@
 按提交信息为中文者识别（上游均为英文）：
 
 - `build.mjs` — fork 自有的 esbuild 打包脚本（上游用 bun bundle）。产物 `dist/index.js` 为 ESM，并写出 `dist/package.json` (`{"type":"module"}`)，使其在 `app.asar` 旁被 Node 当模块加载。父项目用 `pnpm agent:build` 调它。
-- session 费用计算相关改动（`src/CodexAcpServer.ts`、`src/CodexEventHandler.ts`）：上报 per-model USD 用量到 `_meta`，供父项目算人民币开销。
+- session 费用计算相关改动（`src/CodexAcpServer.ts`、`src/CodexEventHandler.ts`）：上报 per-model USD 用量到 `_meta`，供父项目算人民币开销。子 Agent thread（collab/Task spawn 的独立 thread）的 `thread/tokenUsage/updated` 上游会发但默认无人订阅（`notify()` 按 threadId 精确路由）——`subscribeToSubagentThread`（CodexAcpServer）+ `subscribeToSubagentThreadEvents`（CodexAcpClient，去重与 closeSession 清理同源）为每个从 `subAgentActivity.agentThreadId` / `collabAgentToolCall.receiverThreadIds` 发现的子线程注册**仅认 token-usage** 的窄 handler（绝不进主 CodexEventHandler，防污染 turn 状态），快照记入 `SessionState.subagentTokenUsage` 并聚合进 `usage_update`/`buildQuotaMeta` 的 `_meta.quota`（`used`/`size` 保持主线程上下文口径）；同时给对应 subAgentActivity 卡片补发 `_universe/subagentStats`（无 model，父项目只显 tokens 不定价）。配套测试 `subagent-token-usage.test.ts`。
 - Claude 兼容改动（`src/CodexAcpClient.ts`），让一套 `.claude/` 同时服务 Claude 与 Codex：
   - **skills**：`refreshSkills` 在 codex 原生的 `.agents/skills` 之外，额外把 `cwd/.claude/skills` 与各 `additionalRoots/.claude/skills` 加进 `skills/extraRoots/set`。codex 会自动扫 cwd 下的 `.agents/skills` 但从不扫 `.claude/skills`，故须显式列出。与 `.agents/skills` 保持对称（不做存在性检查）以最小化 diff。
   - **memory**：新增 `buildMemoryInstructions(cwd)`，读 `cwd/.claude/memory/MEMORY.md` 作为 `developerInstructions`（附加层，**绝不**用 `baseInstructions`——那会替换 codex 自身系统提示）注入到 `threadStart`/`threadResume`。对齐 Claude 每轮自动加载 memory 索引的行为；codex 随后可用文件工具按需读取 `.claude/memory/<slug>.md`。索引缺失/为空则不注入。

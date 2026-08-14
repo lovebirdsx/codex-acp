@@ -371,6 +371,7 @@ export function createTestSessionState(overrides?: Partial<SessionState>): Sessi
         currentTurnId: null,
         lastTokenUsage: null,
         totalTokenUsage: null,
+        subagentTokenUsage: new Map(),
         modelContextWindow: null,
         rateLimits: null,
         account: null,

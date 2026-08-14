@@ -31,7 +31,8 @@ import type {
     WarningNotification
 } from "./app-server/v2";
 import type { McpStartupCompleteEvent } from "./app-server";
-import {toTokenCount} from "./TokenCount";
+import {aggregateTokenCounts, toTokenCount} from "./TokenCount";
+import type {TokenCount} from "./TokenCount";
 import {
     commandExecutionUsesTerminalOutput,
     createCollabAgentToolCallCompleteUpdate,
@@ -119,6 +120,7 @@ export class CodexEventHandler {
     private readonly terminalCommandOutputIds = new Set<string>();
     private readonly agentMessagePhases = new Map<string, string | null>();
     private readonly activeSubAgentActivities = new Set<string>();
+    private readonly subagentActivityItemByThreadId = new Map<string, string>();
 
     /*
      * Fork addition: liveness probe state. `probeLiveness` is injected as a
@@ -131,17 +133,20 @@ export class CodexEventHandler {
     private lastForwardedAt = Date.now();
     private livenessTimer: ReturnType<typeof setInterval> | null = null;
     private probeInFlight = false;
+    private readonly onSubagentThreadSeen: ((threadId: string) => void) | undefined;
 
     constructor(
         connection: AcpClientConnection,
         sessionState: SessionState,
         supportsPlanUpdates = false,
         probeLiveness?: () => Promise<unknown>,
+        onSubagentThreadSeen?: (threadId: string) => void,
     ) {
         this.sessionState = sessionState;
         this.supportsPlanUpdates = supportsPlanUpdates;
         this.session = new ACPSessionConnection(connection, sessionState.sessionId);
         this.probeLiveness = probeLiveness;
+        this.onSubagentThreadSeen = onSubagentThreadSeen;
     }
 
     getFailure(): RequestError | null {
@@ -493,6 +498,9 @@ export class CodexEventHandler {
                 this.activeImageGenerationItems.add(event.item.id);
                 return createImageGenerationStartUpdate(event.item);
             case "collabAgentToolCall":
+                for (const receiverThreadId of event.item.receiverThreadIds) {
+                    this.onSubagentThreadSeen?.(receiverThreadId);
+                }
                 return createCollabAgentToolCallUpdate(event.item);
             case "agentMessage":
                 this.rememberAgentMessagePhase(event.item);
@@ -501,6 +509,7 @@ export class CodexEventHandler {
                 return createContextCompactionStartUpdate(event.item);
             case "subAgentActivity":
                 this.activeSubAgentActivities.add(event.item.id);
+                this.recordSubagentThread(event.item.agentThreadId, event.item.id);
                 return createSubAgentActivityUpdate(event.item, "in_progress", "tool_call");
             case "sleep":
             case "userMessage":
@@ -550,6 +559,9 @@ export class CodexEventHandler {
             case "webSearch":
                 return createWebSearchCompleteUpdate(event.item);
             case "collabAgentToolCall":
+                for (const receiverThreadId of event.item.receiverThreadIds) {
+                    this.onSubagentThreadSeen?.(receiverThreadId);
+                }
                 return createCollabAgentToolCallCompleteUpdate(event.item);
             case "agentMessage":
                 this.rememberAgentMessagePhase(event.item);
@@ -564,6 +576,7 @@ export class CodexEventHandler {
                 return createContextCompactionCompleteUpdate(event.item);
             //ignored types
             case "subAgentActivity": {
+                this.recordSubagentThread(event.item.agentThreadId, event.item.id);
                 const sessionUpdate = this.activeSubAgentActivities.delete(event.item.id)
                     ? "tool_call_update"
                     : "tool_call";
@@ -884,7 +897,16 @@ export class CodexEventHandler {
 
     private createUsageUpdate(params: ThreadTokenUsageUpdatedNotification): UpdateSessionEvent | null {
         this.handleTokenUsageUpdated(params);
+        return this.createAggregatedUsageUpdate();
+    }
 
+    /*
+     * Fork addition: builds the usage_update from the session's aggregated
+     * token usage (main thread cumulative + every sub-agent thread snapshot).
+     * `used`/`size` stay main-thread only — they describe the main thread's
+     * context occupancy, which sub-agent work does not consume.
+     */
+    private createAggregatedUsageUpdate(): UpdateSessionEvent | null {
         const used = this.sessionState.lastTokenUsage?.totalTokens;
         const size = this.sessionState.modelContextWindow;
         if (used == null || size == null || size <= 0) {
@@ -895,7 +917,10 @@ export class CodexEventHandler {
         // emits a usage_update), so clients can price the whole session from the
         // latest snapshot without missing the intermediate calls a single prompt
         // makes. totalTokenUsage carries every call; lastTokenUsage only the last.
-        const total = this.sessionState.totalTokenUsage;
+        const total = aggregateTokenCounts(
+            this.sessionState.totalTokenUsage,
+            this.sessionState.subagentTokenUsage.values(),
+        );
         const modelName = this.sessionState.currentModelId.replace(/\[.*?]$/, "");
         const meta = total != null
             ? {
@@ -912,6 +937,61 @@ export class CodexEventHandler {
             size,
             ...(meta != null ? {_meta: meta} : {}),
         };
+    }
+
+    /*
+     * Fork addition: handles a sub-agent thread's token-usage notification.
+     * Only records the snapshot and, when the main thread has reported usage
+     * and a context window, re-emits an aggregated usage_update plus the
+     * per-sub-agent stats on the matching subAgentActivity card. Never touches
+     * turn state or the main thread's lastTokenUsage.
+     */
+    async handleSubagentTokenUsage(threadId: string, params: ThreadTokenUsageUpdatedNotification): Promise<void> {
+        const tokenCount = toTokenCount(params.tokenUsage.total);
+        this.sessionState.subagentTokenUsage.set(threadId, tokenCount);
+        logger.log("Subagent token usage recorded", {
+            sessionId: this.sessionState.sessionId,
+            threadId,
+            totalTokens: tokenCount.totalTokens,
+        });
+
+        const updates: UpdateSessionEvent[] = [];
+        const usageUpdate = this.createAggregatedUsageUpdate();
+        if (usageUpdate != null) {
+            updates.push(usageUpdate);
+        }
+        const statsUpdate = this.createSubagentStatsUpdate(threadId, tokenCount);
+        if (statsUpdate != null) {
+            updates.push(statsUpdate);
+        }
+        for (const update of updates) {
+            await this.session.update(update);
+        }
+        this.lastForwardedAt = Date.now();
+    }
+
+    private createSubagentStatsUpdate(threadId: string, tokenCount: TokenCount): UpdateSessionEvent | null {
+        const itemId = this.subagentActivityItemByThreadId.get(threadId);
+        if (itemId == null) {
+            return null;
+        }
+        return {
+            sessionUpdate: "tool_call_update",
+            toolCallId: itemId,
+            _meta: {
+                "_universe/subagentStats": {
+                    inputTokens: tokenCount.inputTokens,
+                    outputTokens: tokenCount.outputTokens,
+                    cacheReadTokens: tokenCount.cachedInputTokens,
+                    cacheCreateTokens: 0,
+                },
+            },
+        };
+    }
+
+    private recordSubagentThread(threadId: string, itemId: string): void {
+        this.subagentActivityItemByThreadId.set(threadId, itemId);
+        this.onSubagentThreadSeen?.(threadId);
     }
 
     private handleRateLimitsUpdated(params: AccountRateLimitsUpdatedNotification): void {

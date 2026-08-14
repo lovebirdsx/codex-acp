@@ -14,6 +14,7 @@ import type {
     ReasoningEffortOption,
     Thread,
     ThreadItem,
+    ThreadTokenUsageUpdatedNotification,
     UserInput
 } from "./app-server/v2";
 import type {RateLimitsMap} from "./RateLimitsMap";
@@ -35,7 +36,7 @@ import {
     REASONING_EFFORT_CONFIG_ID,
 } from "./ModelConfigOption";
 import type {TokenCount} from "./TokenCount";
-import {toPromptUsage} from "./TokenCount";
+import {aggregateTokenCounts, toPromptUsage} from "./TokenCount";
 import {CodexCommands} from "./CodexCommands";
 import {SteeringQueue} from "./SteeringQueue";
 import type {QuotaMeta} from "./QuotaMeta";
@@ -114,6 +115,7 @@ export interface SessionState {
     currentTurnId: string | null;
     lastTokenUsage: TokenCount | null;
     totalTokenUsage: TokenCount | null;
+    subagentTokenUsage: Map<string, TokenCount>;
     modelContextWindow: number | null;
     rateLimits: RateLimitsMap | null;
     account: Account | null;
@@ -482,6 +484,7 @@ export class CodexAcpServer {
             currentTurnId: null,
             lastTokenUsage: null,
             totalTokenUsage: null,
+            subagentTokenUsage: new Map(),
             modelContextWindow: null,
             rateLimits: null,
             account: authState.account,
@@ -1451,6 +1454,7 @@ export class CodexAcpServer {
             currentTurnId: null,
             lastTokenUsage: null,
             totalTokenUsage: null,
+            subagentTokenUsage: new Map(),
             modelContextWindow: null,
             rateLimits: null,
             account: authState.account,
@@ -2091,6 +2095,7 @@ export class CodexAcpServer {
                 sessionState,
                 clientSupportsPlanUpdates(this.clientCapabilities),
                 () => this.codexAcpClient.probeLiveness(),
+                (threadId) => this.subscribeToSubagentThread(params.sessionId, threadId, () => eventHandler),
             );
             eventHandler = promptEventHandler;
             const approvalHandler = new CodexApprovalHandler(this.connection, sessionState, activePrompt.signal);
@@ -2427,8 +2432,13 @@ export class CodexAcpServer {
         // Report session-cumulative usage (not just the last call) so clients can
         // price the whole session from a single snapshot. Codex bills per model
         // call; a single prompt may trigger several, and lastTokenUsage only
-        // carries the final one — totalTokenUsage carries them all.
-        const totalTokenUsage = sessionState.totalTokenUsage;
+        // carries the final one — totalTokenUsage carries them all. Sub-agent
+        // threads (collab/Task) report their own cumulative snapshots under
+        // subagentTokenUsage, folded in so sub-agent work is priced too.
+        const totalTokenUsage = aggregateTokenCounts(
+            sessionState.totalTokenUsage,
+            sessionState.subagentTokenUsage.values(),
+        );
 
         // Remove the "[reasoning-level]" suffix from currentModelId if present
         const modelName = sessionState.currentModelId.replace(/\[.*?]$/, '');
@@ -2451,6 +2461,41 @@ export class CodexAcpServer {
             return null;
         }
         return toPromptUsage(lastTokenUsage);
+    }
+
+    /*
+     * Fork addition: sub-agent threads (collab/Task spawns) are separate
+     * app-server threads that report their own `thread/tokenUsage/updated`
+     * snapshots. The client connection is attached to them upstream, so their
+     * notifications reach this process, but nothing subscribed. Register a
+     * per-thread handler that only folds token-usage into the session total —
+     * never the main CodexEventHandler, whose `turn/started` etc. would pollute
+     * the main session's turn state.
+     */
+    private subscribeToSubagentThread(
+        sessionId: string,
+        threadId: string,
+        getEventHandler: () => CodexEventHandler | null,
+    ): void {
+        if (threadId === sessionId) {
+            return;
+        }
+        const subscribed = this.codexAcpClient.subscribeToSubagentThreadEvents(sessionId, threadId, async (event) => {
+            if (event.method !== "thread/tokenUsage/updated") {
+                return;
+            }
+            const eventThreadId = (event.params as {threadId?: unknown} | undefined)?.threadId;
+            if (eventThreadId !== threadId) {
+                return;
+            }
+            const handler = getEventHandler();
+            if (handler) {
+                await handler.handleSubagentTokenUsage(threadId, event.params as ThreadTokenUsageUpdatedNotification);
+            }
+        });
+        if (subscribed) {
+            logger.log("Subscribed to subagent thread events", {sessionId, threadId});
+        }
     }
 
     private async runWithProcessCheck<T>(operation: () => Promise<T>): Promise<T> {

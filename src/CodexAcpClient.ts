@@ -74,6 +74,7 @@ export class CodexAcpClient {
     private pendingLoginCompleted: Promise<AccountLoginCompletedNotification> | null = null;
     private pendingAccountUpdated: Promise<AccountUpdatedNotification> | null = null;
     private readonly sessionNotificationQueues = new Map<string, Promise<void>>();
+    private readonly subagentThreadHandlersBySession = new Map<string, Set<string>>();
     private skillExtraRoots: string[] = [];
     private configPath: string | null = null;
 
@@ -491,6 +492,13 @@ export class CodexAcpClient {
         try {
             await this.codexClient.threadUnsubscribe({threadId: sessionId});
         } finally {
+            const subagentThreads = this.subagentThreadHandlersBySession.get(sessionId);
+            if (subagentThreads) {
+                for (const threadId of subagentThreads) {
+                    this.codexClient.clearThreadHandlers(threadId);
+                }
+                this.subagentThreadHandlersBySession.delete(sessionId);
+            }
             this.codexClient.clearThreadHandlers(sessionId);
         }
     }
@@ -793,6 +801,35 @@ export class CodexAcpClient {
             if (!queue) return;
             await queue;
         }
+    }
+
+    /*
+     * Fork addition: registers a notification handler for a sub-agent thread
+     * while keeping ordering with the main session's event queue. The handler
+     * is intentionally narrow — it must filter to token-usage only, because
+     * app-server notifications without a threadId (e.g. account/rateLimits) are
+     * broadcast to every registered handler. Dedup lives here, on the same
+     * tracking that closeSession clears, so a session reopened in the same
+     * process can re-subscribe. Returns false when already subscribed.
+     */
+    subscribeToSubagentThreadEvents(
+        sessionId: string,
+        threadId: string,
+        handler: (result: ServerNotification) => void | Promise<void>,
+    ): boolean {
+        let subagentThreads = this.subagentThreadHandlersBySession.get(sessionId);
+        if (!subagentThreads) {
+            subagentThreads = new Set();
+            this.subagentThreadHandlersBySession.set(sessionId, subagentThreads);
+        }
+        if (subagentThreads.has(threadId)) {
+            return false;
+        }
+        subagentThreads.add(threadId);
+        this.codexClient.onServerNotification(threadId, (event) => {
+            this.enqueueSessionNotification(sessionId, () => handler(event));
+        });
+        return true;
     }
 
     private enqueueSessionNotification(sessionId: string, operation: () => void | Promise<void>): void {
