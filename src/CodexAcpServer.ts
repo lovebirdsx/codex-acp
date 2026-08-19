@@ -6,7 +6,7 @@ import {CodexElicitationHandler} from "./CodexElicitationHandler";
 import {type CodexAuthRequest, getCodexAuthMethods, isCodexAuthRequest} from "./CodexAuthMethod";
 import {CodexAcpClient, type SessionMetadata, type SessionMetadataWithThread} from "./CodexAcpClient";
 import type {McpStartupResult} from "./CodexAppServerClient";
-import {ACPSessionConnection, type AcpClientConnection, type UpdateSessionEvent} from "./ACPSessionConnection";
+import {ACPSessionConnection, type AcpClientConnection, type UpdateSessionEvent, MCP_SERVER_STATUS_METHOD} from "./ACPSessionConnection";
 import type {InputModality, ReasoningEffort} from "./app-server";
 import type {
     Account,
@@ -1842,6 +1842,21 @@ export class CodexAcpServer {
             await this.connection.notify(acp.methods.client.session.update, {
                 sessionId,
                 update,
+            });
+        }
+
+        // Fork addition: forward the full startup outcome (including ready
+        // servers, which the failure tool_call updates above never mention) so
+        // the client's MCP panel can flip its config-seeded "pending" rows.
+        const servers = [
+            ...filteredStartup.ready.map(server => ({ name: server, status: "connected" })),
+            ...filteredStartup.failed.map(server => ({ name: server.server, status: "failed" })),
+            ...filteredStartup.cancelled.map(server => ({ name: server, status: "cancelled" })),
+        ];
+        if (servers.length > 0) {
+            await this.connection.notify(MCP_SERVER_STATUS_METHOD, {
+                sessionId,
+                servers,
             });
         }
     }

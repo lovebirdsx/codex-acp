@@ -888,6 +888,128 @@ describe("CodexACPAgent - loadSession", () => {
         });
     });
 
+    // Fork addition: the editor's MCP panel seeds configured servers as "pending"
+    // and needs the full startup outcome (ready servers included — the failure
+    // tool_call cards never mention them) to flip the status.
+    it("forwards the MCP startup outcome (ready + failed) via _universe/mcp_server_status", async () => {
+        const fixture = createCodexMockTestFixture();
+        const codexAcpAgent = fixture.getCodexAcpAgent();
+        const codexAcpClient = fixture.getCodexAcpClient();
+        const codexAppServerClient = fixture.getCodexAppServerClient();
+
+        codexAcpClient.authRequired = vi.fn().mockResolvedValue(false);
+        codexAcpClient.getAccount = vi.fn().mockResolvedValue({
+            account: null,
+            requiresOpenaiAuth: false,
+        });
+        codexAcpClient.listSkills = vi.fn().mockResolvedValue({ data: [] });
+
+        const model: Model = {
+            id: "gpt-5.2",
+            model: "gpt-5.2",
+            upgrade: null,
+            upgradeInfo: null,
+            availabilityNux: null,
+            displayName: "GPT-5.2",
+            description: "Test model",
+            hidden: false,
+            supportedReasoningEfforts: [{ reasoningEffort: "medium", description: "Medium" }],
+            defaultReasoningEffort: "medium",
+            inputModalities: ["text"],
+            supportsPersonality: false,
+            additionalSpeedTiers: [],
+            serviceTiers: [],
+            defaultServiceTier: null,
+            isDefault: true,
+        };
+
+        codexAppServerClient.listModels = vi.fn().mockResolvedValue({
+            data: [model],
+            nextCursor: null,
+        });
+        const thread: Thread = {
+            id: "session-1",
+            sessionId: "session-1",
+            parentThreadId: null,
+            threadSource: null,
+            forkedFromId: null,
+            preview: "",
+            ephemeral: false,
+            modelProvider: "openai",
+            createdAt: 0,
+            updatedAt: 0,
+            recencyAt: null,
+            status: { type: "idle" },
+            path: null,
+            cwd: "/test/project",
+            cliVersion: "0.0.0",
+            source: "cli",
+            agentNickname: null,
+            agentRole: null,
+            gitInfo: null,
+            name: null,
+            turns: [],
+        };
+        codexAppServerClient.threadResume = vi.fn().mockResolvedValue({
+            thread: thread,
+            model: model.id,
+            modelProvider: "openai",
+            cwd: "/test/project",
+            approvalPolicy: "never",
+            sandbox: { type: "dangerFullAccess" },
+            reasoningEffort: model.defaultReasoningEffort,
+        });
+        codexAppServerClient.threadRead = vi.fn().mockResolvedValue({
+            thread: thread,
+        });
+
+        await codexAcpAgent.initialize({ protocolVersion: 1 });
+
+        const loadPromise = codexAcpAgent.loadSession({
+            sessionId: "session-1",
+            cwd: "/test/project",
+            mcpServers: [{
+                name: "good-mcp",
+                command: "npx",
+                args: ["good"],
+                env: [],
+            }, {
+                name: "broken-mcp",
+                command: "npx",
+                args: ["broken"],
+                env: [],
+            }],
+        });
+
+        await vi.waitFor(() => {
+            expect(codexAcpAgent.getSessionState("session-1").sessionMcpServers).toEqual(["good-mcp", "broken-mcp"]);
+        });
+
+        fixture.sendServerNotification({
+            method: "mcpServer/startupStatus/updated",
+            params: { threadId: "session-1", name: "good-mcp", status: "ready" }
+        });
+        fixture.sendServerNotification({
+            method: "mcpServer/startupStatus/updated",
+            params: { threadId: "session-1", name: "broken-mcp", status: "failed", error: "boom" }
+        });
+
+        await loadPromise;
+
+        await vi.waitFor(() => {
+            const statusEvent = fixture.getAcpConnectionEvents([]).find(
+                (event) => event.method === "notify" && event.args[0] === "_universe/mcp_server_status",
+            );
+            expect(statusEvent?.args[1]).toEqual({
+                sessionId: "session-1",
+                servers: [
+                    { name: "good-mcp", status: "connected" },
+                    { name: "broken-mcp", status: "failed" },
+                ],
+            });
+        });
+    });
+
     it("replays a request_user_input rollout pair as a readable question card with the answer", async () => {
         const fixture = createCodexMockTestFixture();
         const codexAcpAgent = fixture.getCodexAcpAgent();

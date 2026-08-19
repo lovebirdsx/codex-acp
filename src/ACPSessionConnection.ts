@@ -41,3 +41,12 @@ export type UpdateSessionEvent = SessionNotification["update"];
 
 // Duplicated verbatim in the editor's acpExtMethods.ts (ACP_EXT_METHODS).
 export const LIVENESS_PING_METHOD = "_universe/liveness_ping";
+
+// Duplicated verbatim in the editor's acpExtMethods.ts (ACP_EXT_METHODS).
+// Fork addition: MCP server startup outcome forwarded to the client. The
+// editor's MCP panel seeds every configured server as "pending" and needs a
+// status snapshot to flip it; the failure tool_call cards never mention ready
+// servers, so without this the panel shows "pending" forever on codex.
+// Params: { sessionId, servers: Array<{ name, status }> } with status one of
+// "connected" | "failed" | "cancelled".
+export const MCP_SERVER_STATUS_METHOD = "_universe/mcp_server_status";
