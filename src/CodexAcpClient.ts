@@ -23,6 +23,7 @@ import path from "node:path";
 import fs from "node:fs";
 import {arePathsEqual, gitWorktreePaths} from "./PathUtils";
 import {logger} from "./Logger";
+import {syncSkillPolicyFiles} from "./skillPolicyBridge";
 import {sanitizeMcpServerName} from "./McpServerName";
 import type {
     AccountLoginCompletedNotification,
@@ -686,6 +687,16 @@ export class CodexAcpClient {
             path.join(cwd, ".claude", "skills"),
             ...additionalRoots.map(root => path.join(root, ".claude", "skills")),
         ];
+
+        // fork-only: bridge the Claude-side `disable-model-invocation` frontmatter of
+        // the additionalRoots the host injects into codex's per-skill openai.yaml.
+        // Only these host-managed roots are written to (bundled install dir / repo
+        // tree); cwd/.claude/skills is the user's project and is never touched.
+        await syncSkillPolicyFiles([
+            ...additionalRoots.map(root => path.join(root, ".agents", "skills")),
+            ...additionalRoots.map(root => path.join(root, ".claude", "skills")),
+        ]);
+
         if (!arraysEqual(this.skillExtraRoots, skillExtraRoots)) {
             await this.codexClient.skillsExtraRootsSet({ extraRoots: skillExtraRoots });
             this.skillExtraRoots = skillExtraRoots;
