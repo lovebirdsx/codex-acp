@@ -1,5 +1,6 @@
 import * as acp from "@agentclientprotocol/sdk";
 import type {AcpClientConnection} from "../ACPSessionConnection";
+import {MCP_SERVER_STATUS_METHOD} from "../ACPSessionConnection";
 import type {CodexAcpClient} from "../CodexAcpClient";
 import {logger} from "../Logger";
 import {sanitizeMcpServerName} from "../McpServerName";
@@ -180,14 +181,30 @@ export class McpSessionStartup {
         }
 
         const renderer = new AcpToolCallRenderer(this.capabilities());
-        for (const facts of McpStartupReporter.failures({
+        const startup = {
             ...filteredStartup,
             ready: readyAfterOauth,
             failed: failuresAfterOauth,
-        })) {
+        };
+        for (const facts of McpStartupReporter.failures(startup)) {
             await this.connection.notify(acp.methods.client.session.update, {
                 sessionId,
                 update: renderer.render(facts),
+            });
+        }
+
+        // Fork addition: forward the full startup outcome (including ready
+        // servers, which the failure tool_call updates above never mention) so
+        // the client's MCP panel can flip its config-seeded "pending" rows.
+        const servers = [
+            ...startup.ready.map(server => ({ name: server, status: "connected" })),
+            ...startup.failed.map(server => ({ name: server.server, status: "failed" })),
+            ...startup.cancelled.map(server => ({ name: server, status: "cancelled" })),
+        ];
+        if (servers.length > 0) {
+            await this.connection.notify(MCP_SERVER_STATUS_METHOD, {
+                sessionId,
+                servers,
             });
         }
     }
