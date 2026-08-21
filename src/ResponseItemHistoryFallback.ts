@@ -1,4 +1,4 @@
-import { readFile } from "node:fs/promises";
+import { REPLAY_ROLLOUT_READ_CAP_BYTES, readFileWithinCap } from "./ReplayFileRead";
 import path from "node:path";
 import type { ContentBlock } from "@agentclientprotocol/sdk";
 import type { UpdateSessionEvent } from "./ACPSessionConnection";
@@ -7,6 +7,7 @@ import type { CommandAction, Thread, ThreadItem } from "./app-server/v2";
 import { createCommandActionEvent } from "./CodexToolCallMapper";
 import { createTerminalOutputMeta, type TerminalOutputMode } from "./TerminalOutputMode";
 import { createAgentMessageChunk, createCodexMessagePhaseMeta } from "./ContentChunks";
+import { logger } from "./Logger";
 
 type JsonRecord = Record<string, unknown>;
 type AcpToolCallEvent = Extract<UpdateSessionEvent, { sessionUpdate: "tool_call" }>;
@@ -72,10 +73,10 @@ export async function createResponseItemHistoryFallbackUpdates(
         return null;
     }
 
-    let contents: string;
-    try {
-        contents = await readFile(thread.path, "utf8");
-    } catch {
+    const contents = await readFileWithinCap(thread.path, REPLAY_ROLLOUT_READ_CAP_BYTES, (size) => {
+        logger.log(`replay: skipping rollout fallback for ${thread.path} (${size} bytes exceeds the read cap)`);
+    });
+    if (contents === null) {
         return null;
     }
 

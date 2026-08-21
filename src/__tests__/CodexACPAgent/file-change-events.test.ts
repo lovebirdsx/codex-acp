@@ -34,6 +34,15 @@ vi.mock('node:fs/promises', () => ({
         }
         throw new Error(`ENOENT: no such file or directory, open '${path}'`);
     },
+    // readFileWithinCap stats before reading to skip oversized files; the mock
+    // reports the in-memory content's length so those reads stay under the cap.
+    stat: async (path: string) => {
+        const content = mockFiles.get(path);
+        if (content === undefined) {
+            throw new Error(`ENOENT: no such file or directory, stat '${path}'`);
+        }
+        return { isFile: () => true, size: content.length };
+    },
 }));
 
 describe('CodexEventHandler - file change events', () => {

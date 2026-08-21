@@ -43,6 +43,7 @@ import type {QuotaMeta} from "./QuotaMeta";
 import {logger} from "./Logger";
 import {sanitizeMcpServerName} from "./McpServerName";
 import {createResponseItemHistoryFallbackUpdates} from "./ResponseItemHistoryFallback";
+import {capReplayUpdate, REPLAY_TOTAL_CAP_BYTES} from "./ReplayBudget";
 import {
     type LegacyLoadSessionResponse,
     type LegacyNewSessionResponse,
@@ -1527,8 +1528,49 @@ export class CodexAcpServer {
         const updates = responseItemFallbackUpdates
             ? mergeHistoryUpdates(responseItemFallbackUpdates, threadUpdates)
             : threadUpdates;
+        await this.streamCappedHistoryUpdates(session, sessionId, updates);
+    }
+
+    /*
+     * Fork addition: ship replayed history under a byte budget. Without this a
+     * long build-and-test thread re-ships its whole corpus (hundreds of command
+     * outputs plus whole-file diffs) on every resume, which OOMs the editor's
+     * renderer — main has to encode and clone every byte on the way there, so
+     * the renderer's own ingestion budget can't save it. Mirrors the claude
+     * fork's MAIN_REPLAY_*_CAP_BYTES bound in acp-agent.ts.
+     */
+    private async streamCappedHistoryUpdates(
+        session: ACPSessionConnection,
+        sessionId: string,
+        updates: UpdateSessionEvent[],
+        totalCapBytes = REPLAY_TOTAL_CAP_BYTES,
+    ): Promise<void> {
+        let sentBytes = 0;
+        let sentCount = 0;
         for (const update of updates) {
-            await session.update(update);
+            const capped = capReplayUpdate(update);
+            if (sentBytes + capped.bytes > totalCapBytes) {
+                logger.log(
+                    `replay: truncated history for ${sessionId} after ${sentCount}/${updates.length} updates `
+                    + `(${sentBytes} bytes; next update ${capped.bytes} bytes would exceed the ${totalCapBytes} byte cap)`,
+                );
+                // Stop rather than fail the resume: the session still opens with
+                // its earlier turns intact. Say so instead of dropping the tail
+                // silently — this is history the user reads. Same shape as the
+                // claude fork's truncation notice.
+                await session.update({
+                    sessionUpdate: "agent_message_chunk",
+                    content: {
+                        type: "text",
+                        text: "History replay truncated: the rest of this session's history exceeds the "
+                            + "replay size limit.",
+                    },
+                });
+                return;
+            }
+            sentBytes += capped.bytes;
+            sentCount += 1;
+            await session.update(capped.update);
         }
     }
 

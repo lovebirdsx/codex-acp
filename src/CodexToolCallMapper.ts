@@ -1,6 +1,6 @@
 import type { ContentBlock, ToolCallContent } from "@agentclientprotocol/sdk";
 import { applyPatch, parsePatch, reversePatch } from "diff";
-import { readFile } from "node:fs/promises";
+import { REPLAY_FILE_READ_CAP_BYTES, readFileWithinCap } from "./ReplayFileRead";
 import path from "node:path";
 import type { UpdateSessionEvent } from "./ACPSessionConnection";
 import { stripShellPrefix } from "./CommandUtils";
@@ -907,7 +907,9 @@ async function createDeleteFileContent(change: FileUpdateChange): Promise<ToolCa
 }
 
 async function readFileContent(filePath: string): Promise<string | null> {
-    return await readFile(filePath, { encoding: "utf8" }).catch(() => null);
+    return await readFileWithinCap(filePath, REPLAY_FILE_READ_CAP_BYTES, (size) => {
+        logger.log(`replay: skipping diff for ${filePath} (${size} bytes exceeds the read cap)`);
+    });
 }
 
 /**
