@@ -1,7 +1,125 @@
 import { describe, it, expect, vi } from "vitest";
+import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import type * as acp from "@agentclientprotocol/sdk";
 import { createCodexMockTestFixture, createTestModel } from "../acp-test-utils";
-import type { Model, Thread, ThreadGoal, UserInput } from "../../app-server/v2";
+import type { Model, Thread, ThreadGoal, ThreadItem, ThreadItemsListParams, UserInput } from "../../app-server/v2";
+
+const rolloutLine = (type: string, payload: unknown): string =>
+    JSON.stringify({ timestamp: "2026-01-01T00:00:00.000Z", type, payload });
+
+/**
+ * One resolved turn of a real rollout that asked a question: the elicitation
+ * only leaves the model's own function_call/function_call_output pair behind,
+ * and the app-server's typed history drops it.
+ */
+function questionTurnRollout(options: {
+    callId: string;
+    clientId: string;
+    prompt: string;
+    commentary: string;
+    question: string;
+    answer: string;
+    final: string;
+}): string[] {
+    return [
+        rolloutLine("event_msg", { type: "task_started", turn_id: options.callId }),
+        rolloutLine("turn_context", {
+            cwd: "/workspace",
+            approval_policy: "never",
+            sandbox_policy: { type: "danger-full-access" },
+            model: "gpt-5.2",
+            effort: "medium",
+            summary: "auto",
+        }),
+        rolloutLine("response_item", {
+            type: "message",
+            role: "user",
+            content: [{ type: "input_text", text: options.prompt }],
+        }),
+        rolloutLine("event_msg", {
+            type: "user_message",
+            message: options.prompt,
+            images: [],
+            local_images: [],
+            text_elements: [],
+            client_id: options.clientId,
+        }),
+        rolloutLine("response_item", {
+            type: "message",
+            role: "assistant",
+            content: [{ type: "output_text", text: options.commentary }],
+            phase: "commentary",
+        }),
+        rolloutLine("response_item", {
+            type: "function_call",
+            name: "request_user_input",
+            arguments: JSON.stringify({
+                questions: [{
+                    header: "数学选择题",
+                    id: "answer",
+                    options: [
+                        { label: "A. 12", description: "选择选项 A" },
+                        { label: "B. 15", description: "选择选项 B" },
+                        { label: "C. 18", description: "选择选项 C" },
+                    ],
+                    question: options.question,
+                }],
+            }),
+            call_id: options.callId,
+        }),
+        rolloutLine("response_item", {
+            type: "function_call_output",
+            call_id: options.callId,
+            output: JSON.stringify({ answers: { answer: { answers: [options.answer] } } }),
+        }),
+        rolloutLine("response_item", {
+            type: "message",
+            role: "assistant",
+            content: [{ type: "output_text", text: options.final }],
+            phase: "final_answer",
+        }),
+        rolloutLine("event_msg", { type: "task_complete", turn_id: options.callId }),
+    ];
+}
+
+async function writeRollout(dir: string, lines: string[]): Promise<string> {
+    const path = join(dir, "rollout.jsonl");
+    await writeFile(path, `${lines.join("\n")}\n`, "utf8");
+    return path;
+}
+
+function replayedQuestionUpdates(fixture: ReturnType<typeof createCodexMockTestFixture>) {
+    const updates = fixture.getAcpConnectionEvents([])
+        .filter(event => event.method === "sessionUpdate")
+        .map(event => event.args[0].update);
+    return {
+        updates,
+        toolCallIndex: updates.findIndex(update => update.sessionUpdate === "tool_call"),
+        answerIndex: updates.findIndex(update => update.sessionUpdate === "tool_call_update"),
+    };
+}
+
+/** A fake thread/items/list over `entries`, in pages of `pageSize` items. */
+function itemListStore(entries: Array<{ turnId: string; item: ThreadItem }>, pageSize = 2) {
+    return async (params: ThreadItemsListParams) => {
+        const cursor = params.cursor as string | null | undefined;
+        if (params.sortDirection === "desc") {
+            const index = cursor === null || cursor === undefined
+                ? entries.length - 1
+                : entries.findIndex(entry => `item:${entry.item.id}` === cursor);
+            return { data: index < 0 ? [] : [entries[index]!], nextCursor: null, backwardsCursor: null };
+        }
+        const start = cursor === null || cursor === undefined ? 0 : Number(cursor.slice("asc:".length));
+        const end = Math.min(start + pageSize, entries.length);
+        return {
+            data: entries.slice(start, end).map(entry => ({ ...entry, startedAtMs: null, completedAtMs: null })),
+            nextCursor: end < entries.length ? `asc:${end}` : null,
+            backwardsCursor: null,
+        };
+    };
+}
 
 describe("CodexACPAgent - loadSession", () => {
     it("preserves every native user input kind during history replay", async () => {
@@ -1122,5 +1240,284 @@ describe("CodexACPAgent - loadSession", () => {
         // It lands after the interrupted turn's items and before the next turn's replay.
         expect(markerIndex).toBeGreaterThan(updates.findIndex(update => update.messageId === "user-1"));
         expect(markerIndex).toBeLessThan(updates.findIndex(update => update.messageId === "user-2"));
+    });
+
+    it("replays a request_user_input rollout pair as a readable question card with the answer", async () => {
+        const fixture = createCodexMockTestFixture();
+        const agent = fixture.getCodexAcpAgent();
+        const client = fixture.getCodexAcpClient();
+        const appServer = fixture.getCodexAppServerClient();
+        const dir = await mkdtemp(join(tmpdir(), "codex-acp-user-input-"));
+        try {
+            const rolloutPath = await writeRollout(dir, questionTurnRollout({
+                callId: "call-ask",
+                clientId: "client-ask-1",
+                prompt: "使用ask_user工具，考我一道数学的选择题。",
+                commentary: "我会用交互式提问工具出一道数学选择题。",
+                question: "若 3x + 6 = 24，则 x 等于多少？",
+                answer: "6",
+                final: "你答对了，x = 6。",
+            }));
+            client.readAuthRequirement = vi.fn().mockResolvedValue({ required: false, account: null });
+            client.getAccount = vi.fn().mockResolvedValue({ account: null, requiresOpenaiAuth: false });
+            client.listSkills = vi.fn().mockResolvedValue({ data: [] });
+            const model = createTestModel();
+            appServer.listModels = vi.fn().mockResolvedValue({ data: [model], nextCursor: null });
+            const thread = {
+                id: "question-history",
+                historyMode: "legacy",
+                path: rolloutPath,
+                turns: [{
+                    id: "turn-1",
+                    itemsView: "full",
+                    status: "completed",
+                    error: null,
+                    startedAt: null,
+                    completedAt: null,
+                    durationMs: null,
+                    items: [
+                        {
+                            type: "userMessage",
+                            id: "item-user-1",
+                            clientId: "client-ask-1",
+                            content: [{ type: "text", text: "使用ask_user工具，考我一道数学的选择题。", text_elements: [] }],
+                        },
+                        {
+                            type: "agentMessage",
+                            id: "item-agent-1",
+                            text: "我会用交互式提问工具出一道数学选择题。",
+                            phase: "commentary",
+                            memoryCitation: null,
+                            delivery: null,
+                            questions: null,
+                        },
+                        {
+                            type: "agentMessage",
+                            id: "item-agent-2",
+                            text: "你答对了，x = 6。",
+                            phase: "final_answer",
+                            memoryCitation: null,
+                            delivery: null,
+                            questions: null,
+                        },
+                    ],
+                }],
+            } as unknown as Thread;
+            appServer.threadResume = vi.fn().mockResolvedValue({
+                thread,
+                model: model.id,
+                modelProvider: "openai",
+                cwd: "/workspace",
+                approvalPolicy: "never",
+                sandbox: { type: "dangerFullAccess" },
+                reasoningEffort: model.defaultReasoningEffort,
+            });
+            appServer.threadReadWithHistory = vi.fn().mockResolvedValue({ thread });
+
+            await agent.initialize({ protocolVersion: 1, clientCapabilities: {} });
+            await agent.loadSession({ sessionId: thread.id, cwd: "/workspace", mcpServers: [] });
+
+            const { updates, toolCallIndex, answerIndex } = replayedQuestionUpdates(fixture);
+            expect(updates[toolCallIndex]).toMatchObject({
+                toolCallId: "call-ask",
+                kind: "other",
+                title: "若 3x + 6 = 24，则 x 等于多少？",
+            });
+            // The card lands between the commentary and the final answer, and
+            // carries the answers the live card showed.
+            const commentaryIndex = updates.findIndex(update => update.sessionUpdate === "agent_message_chunk"
+                && update.content?.type === "text" && update.content.text.includes("交互式提问工具"));
+            const finalAnswerIndex = updates.findIndex(update => update.sessionUpdate === "agent_message_chunk"
+                && update.content?.type === "text" && update.content.text.includes("你答对了"));
+            expect(toolCallIndex).toBeGreaterThan(commentaryIndex);
+            expect(toolCallIndex).toBeLessThan(finalAnswerIndex);
+            expect(updates[answerIndex]).toMatchObject({ toolCallId: "call-ask", status: "completed" });
+            expect(JSON.stringify(updates[answerIndex])).toContain("**答案**：6");
+            // Exactly the pair the live path publishes: no duplicate card.
+            expect(updates.filter(update => update.sessionUpdate === "tool_call")).toHaveLength(1);
+            expect(updates.filter(update => update.sessionUpdate === "tool_call_update")).toHaveLength(1);
+        } finally {
+            await rm(dir, { recursive: true, force: true });
+        }
+    });
+
+    it("replays the question card on the paginated history the editor reads", async () => {
+        const fixture = createCodexMockTestFixture();
+        const agent = fixture.getCodexAcpAgent();
+        const client = fixture.getCodexAcpClient();
+        const appServer = fixture.getCodexAppServerClient();
+        const dir = await mkdtemp(join(tmpdir(), "codex-acp-user-input-paginated-"));
+        try {
+            const rolloutPath = await writeRollout(dir, questionTurnRollout({
+                callId: "call-ask",
+                clientId: "client-ask-1",
+                prompt: "Ask me a question.",
+                commentary: "I will ask a question.",
+                question: "Which one?",
+                answer: "A",
+                final: "It was A.",
+            }));
+            client.readAuthRequirement = vi.fn().mockResolvedValue({ required: false, account: null });
+            client.getAccount = vi.fn().mockResolvedValue({ account: null, requiresOpenaiAuth: false });
+            client.listSkills = vi.fn().mockResolvedValue({ data: [] });
+            const model = createTestModel();
+            appServer.listModels = vi.fn().mockResolvedValue({ data: [model], nextCursor: null });
+            const items: ThreadItem[] = [
+                { type: "userMessage", id: "item-user-1", clientId: "client-ask-1", content: [{ type: "text", text: "Ask me a question.", text_elements: [] }] },
+                { type: "agentMessage", id: "item-agent-1", text: "I will ask a question.", phase: "commentary", memoryCitation: null, delivery: null, questions: null },
+                { type: "agentMessage", id: "item-agent-2", text: "It was A.", phase: "final_answer", memoryCitation: null, delivery: null, questions: null },
+            ];
+            appServer.threadResume = vi.fn().mockResolvedValue({
+                thread: { id: "question-paginated", historyMode: "paginated", path: rolloutPath, turns: [] },
+                itemsBackwardsCursor: `item:${items[2]!.id}`,
+                model: model.id,
+                modelProvider: "openai",
+                cwd: "/workspace",
+                approvalPolicy: "never",
+                sandbox: { type: "dangerFullAccess" },
+                reasoningEffort: model.defaultReasoningEffort,
+            });
+            appServer.threadItemsList = vi.fn().mockImplementation(itemListStore(
+                items.map(item => ({ turnId: "turn-1", item })),
+            ));
+
+            await agent.initialize({ protocolVersion: 1, clientCapabilities: {} });
+            await agent.loadSession({ sessionId: "question-paginated", cwd: "/workspace", mcpServers: [] });
+
+            const { updates, toolCallIndex, answerIndex } = replayedQuestionUpdates(fixture);
+            expect(updates[toolCallIndex]).toMatchObject({ toolCallId: "call-ask", title: "Which one?" });
+            const finalAnswerIndex = updates.findIndex(update => update.sessionUpdate === "agent_message_chunk"
+                && update.content?.type === "text" && update.content.text === "It was A.");
+            expect(toolCallIndex).toBeLessThan(finalAnswerIndex);
+            expect(JSON.stringify(updates[answerIndex])).toContain("**答案**：A");
+        } finally {
+            await rm(dir, { recursive: true, force: true });
+        }
+    });
+
+    it("drops the question cards of the turns a rewind removed from the thread", async () => {
+        const fixture = createCodexMockTestFixture();
+        const agent = fixture.getCodexAcpAgent();
+        const client = fixture.getCodexAcpClient();
+        const appServer = fixture.getCodexAppServerClient();
+        const dir = await mkdtemp(join(tmpdir(), "codex-acp-user-input-rewind-"));
+        try {
+            const rolloutPath = await writeRollout(dir, [
+                ...questionTurnRollout({
+                    callId: "call-kept",
+                    clientId: "client-kept",
+                    prompt: "Kept prompt.",
+                    commentary: "Kept commentary.",
+                    question: "Kept question?",
+                    answer: "A",
+                    final: "Kept answer.",
+                }),
+                ...questionTurnRollout({
+                    callId: "call-dropped",
+                    clientId: "client-dropped",
+                    prompt: "Dropped prompt.",
+                    commentary: "Dropped commentary.",
+                    question: "Dropped question?",
+                    answer: "B",
+                    final: "Dropped answer.",
+                }),
+            ]);
+            client.readAuthRequirement = vi.fn().mockResolvedValue({ required: false, account: null });
+            client.getAccount = vi.fn().mockResolvedValue({ account: null, requiresOpenaiAuth: false });
+            client.listSkills = vi.fn().mockResolvedValue({ data: [] });
+            const model = createTestModel();
+            appServer.listModels = vi.fn().mockResolvedValue({ data: [model], nextCursor: null });
+            // A rewind truncated the thread to its first turn; the rollout keeps both.
+            const thread = {
+                id: "question-rewind",
+                historyMode: "legacy",
+                path: rolloutPath,
+                turns: [{
+                    id: "turn-1",
+                    itemsView: "full",
+                    status: "completed",
+                    error: null,
+                    startedAt: null,
+                    completedAt: null,
+                    durationMs: null,
+                    items: [
+                        { type: "userMessage", id: "item-user-1", clientId: "client-kept", content: [{ type: "text", text: "Kept prompt.", text_elements: [] }] },
+                        { type: "agentMessage", id: "item-agent-1", text: "Kept commentary.", phase: "commentary", memoryCitation: null, delivery: null, questions: null },
+                        { type: "agentMessage", id: "item-agent-2", text: "Kept answer.", phase: "final_answer", memoryCitation: null, delivery: null, questions: null },
+                    ],
+                }],
+            } as unknown as Thread;
+            appServer.threadResume = vi.fn().mockResolvedValue({
+                thread,
+                model: model.id,
+                modelProvider: "openai",
+                cwd: "/workspace",
+                approvalPolicy: "never",
+                sandbox: { type: "dangerFullAccess" },
+                reasoningEffort: model.defaultReasoningEffort,
+            });
+            appServer.threadReadWithHistory = vi.fn().mockResolvedValue({ thread });
+
+            await agent.initialize({ protocolVersion: 1, clientCapabilities: {} });
+            await agent.loadSession({ sessionId: thread.id, cwd: "/workspace", mcpServers: [] });
+
+            const { updates, toolCallIndex } = replayedQuestionUpdates(fixture);
+            expect(updates[toolCallIndex]).toMatchObject({ toolCallId: "call-kept" });
+            expect(updates.some(update => update.sessionUpdate === "tool_call" && update.toolCallId === "call-dropped")).toBe(false);
+            expect(updates.some(update => update.sessionUpdate === "tool_call_update" && update.toolCallId === "call-dropped")).toBe(false);
+        } finally {
+            await rm(dir, { recursive: true, force: true });
+        }
+    });
+
+    it("loads a session whose rollout cannot be read, without the question cards", async () => {
+        const fixture = createCodexMockTestFixture();
+        const agent = fixture.getCodexAcpAgent();
+        const client = fixture.getCodexAcpClient();
+        const appServer = fixture.getCodexAppServerClient();
+        client.readAuthRequirement = vi.fn().mockResolvedValue({ required: false, account: null });
+        client.getAccount = vi.fn().mockResolvedValue({ account: null, requiresOpenaiAuth: false });
+        client.listSkills = vi.fn().mockResolvedValue({ data: [] });
+        const model = createTestModel();
+        appServer.listModels = vi.fn().mockResolvedValue({ data: [model], nextCursor: null });
+        const thread = {
+            id: "question-missing-rollout",
+            historyMode: "legacy",
+            path: "/workspace/rollout-that-was-deleted.jsonl",
+            turns: [{
+                id: "turn-1",
+                itemsView: "full",
+                status: "completed",
+                error: null,
+                startedAt: null,
+                completedAt: null,
+                durationMs: null,
+                items: [{
+                    type: "userMessage",
+                    id: "item-user-1",
+                    clientId: "client-ask-1",
+                    content: [{ type: "text", text: "Still replayed.", text_elements: [] }],
+                }],
+            }],
+        } as unknown as Thread;
+        appServer.threadResume = vi.fn().mockResolvedValue({
+            thread,
+            model: model.id,
+            modelProvider: "openai",
+            cwd: "/workspace",
+            approvalPolicy: "never",
+            sandbox: { type: "dangerFullAccess" },
+            reasoningEffort: model.defaultReasoningEffort,
+        });
+        appServer.threadReadWithHistory = vi.fn().mockResolvedValue({ thread });
+
+        await agent.initialize({ protocolVersion: 1, clientCapabilities: {} });
+        await expect(agent.loadSession({ sessionId: thread.id, cwd: "/workspace", mcpServers: [] }))
+            .resolves.toBeDefined();
+
+        const { updates } = replayedQuestionUpdates(fixture);
+        expect(updates.some(update => update.sessionUpdate === "tool_call")).toBe(false);
+        expect(updates.some(update => update.sessionUpdate === "user_message_chunk"
+            && update.content?.type === "text" && update.content.text === "Still replayed.")).toBe(true);
     });
 });

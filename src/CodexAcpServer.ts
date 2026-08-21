@@ -68,6 +68,14 @@ import {logger} from "./Logger";
 import {settledWithin} from "./StdUtils";
 import type {ToolCallReports} from "./ToolCallReports";
 import {ToolCallReportingConnection} from "./ToolCallReportingConnection";
+import {capReplayUpdate, REPLAY_TOTAL_CAP_BYTES} from "./ReplayBudget";
+import {
+    createReplayedUserInputUpdates,
+    historyAnchorKey,
+    readRequestUserInputReplay,
+    type ReplayedUserInputCard,
+    RequestUserInputReplay,
+} from "./RequestUserInputReplay";
 import {
     AUTH_STATUS_META_KEY,
     AUTH_STATUS_UPDATE_METHOD,
@@ -284,6 +292,17 @@ interface ActiveAuthState {
  * `"unavailable"` means a read that failed without an answer about the login, see {@link isAccountReadUnavailableError}.
  */
 type KnownAccount = GetAccountResponse | "unavailable" | null;
+
+/*
+ * Fork addition: the running state of one history replay's byte budget. The
+ * replay stops (with a notice) once `sentBytes` would exceed
+ * `REPLAY_TOTAL_CAP_BYTES`; `truncated` keeps every later update suppressed.
+ */
+interface ReplayBudgetState {
+    sentBytes: number;
+    sentCount: number;
+    truncated: boolean;
+}
 
 /** True for the `auth_required` error that {@link CodexAcpServer.checkAuthorization} throws. */
 function isAuthRequiredError(error: unknown): boolean {
@@ -2439,6 +2458,12 @@ export class CodexAcpServer {
         const interruptedTurnTails = materialized
             ? await this.codexAcpClient.interruptedTurnTailItemIds(sessionId)
             : new Set<string>();
+        // fork: the typed history has no trace of the request_user_input pairs,
+        // so their question cards come back from the rollout (see
+        // readRequestUserInputReplay). A read failure costs the cards, not the
+        // session.
+        const userInputReplay = await readRequestUserInputReplay(thread);
+        const budget: ReplayBudgetState = {sentBytes: 0, sentCount: 0, truncated: false};
         if (clientSupportsSubagents(this.clientCapabilities)) {
             await this.streamNativeThreadHistory(
                 sessionId,
@@ -2448,16 +2473,35 @@ export class CodexAcpServer {
                 new Set(),
                 isOpen,
                 interruptedTurnTails,
+                budget,
+                userInputReplay,
             );
-            return;
-        }
-        for await (const items of itemPages) {
-            for (const item of items) {
-                if (!isOpen()) throw new SessionClosedDuringLoadError();
-                await this.streamHistoryItem(session, item, sessionState, interruptedTurnTails);
+        } else {
+            for await (const items of itemPages) {
+                for (const item of items) {
+                    if (!isOpen()) throw new SessionClosedDuringLoadError();
+                    if (!await this.streamHistoryItem(
+                        session,
+                        sessionId,
+                        item,
+                        sessionState,
+                        interruptedTurnTails,
+                        budget,
+                        userInputReplay,
+                    )) {
+                        return;
+                    }
+                }
             }
         }
+        await this.streamRemainingUserInputCards(session, sessionId, userInputReplay, budget);
     }
+
+    /*
+     * Fork addition: byte budget of one history replay. The budget is charged
+     * per update by {@link streamCappedHistoryUpdate} and spans the whole
+     * replay, including the nested native subagent histories.
+     */
 
     /**
      * fork-only: `interruptedTurnTails` holds the last item id of every turn of
@@ -2468,22 +2512,106 @@ export class CodexAcpServer {
      * appends live on cancel, right after that turn's last item. No messageId:
      * the marker anchors nothing, and the editor's replay filter matches it by
      * text when a retracted (zero-output) cancel needs it skipped.
+     *
+     * Returns false once the replay byte budget is exhausted, so the caller
+     * stops reading and shipping the rest of the history.
      */
     private async streamHistoryItem(
         session: ACPSessionConnection,
+        sessionId: string,
         item: ThreadItem,
         sessionState: SessionState,
         interruptedTurnTails: ReadonlySet<string>,
-    ): Promise<void> {
-        for (const update of await this.createHistoryUpdates(item, sessionState)) {
-            await session.update(update);
-        }
+        budget: ReplayBudgetState,
+        userInputReplay: RequestUserInputReplay,
+    ): Promise<boolean> {
+        const cards = userInputReplay.takeBefore(historyAnchorKey(item));
+        if (!await this.streamUserInputCards(session, sessionId, cards, budget)) return false;
+        const updates = await this.createHistoryUpdates(item, sessionState);
         if (interruptedTurnTails.has(item.id)) {
-            await session.update(createUserMessageChunk({
+            updates.push(createUserMessageChunk({
                 type: "text",
                 text: "[Request interrupted by user]",
             }));
         }
+        for (const update of updates) {
+            if (!await this.streamCappedHistoryUpdate(session, sessionId, update, budget)) return false;
+        }
+        return true;
+    }
+
+    /*
+     * Fork addition: replay a request_user_input question card. The rollout holds
+     * the pair the typed history dropped (see readRequestUserInputReplay); the two
+     * updates are the same ones the live session published, charged against the
+     * same replay byte budget as every other replayed update.
+     */
+    private async streamUserInputCards(
+        session: ACPSessionConnection,
+        sessionId: string,
+        cards: ReplayedUserInputCard[],
+        budget: ReplayBudgetState,
+    ): Promise<boolean> {
+        for (const card of cards) {
+            for (const update of createReplayedUserInputUpdates(card)) {
+                if (!await this.streamCappedHistoryUpdate(session, sessionId, update, budget)) return false;
+            }
+        }
+        return true;
+    }
+
+    private async streamRemainingUserInputCards(
+        session: ACPSessionConnection,
+        sessionId: string,
+        userInputReplay: RequestUserInputReplay,
+        budget: ReplayBudgetState,
+    ): Promise<void> {
+        await this.streamUserInputCards(session, sessionId, userInputReplay.takeRemaining(), budget);
+    }
+
+    /*
+     * Fork addition: ship replayed history under a byte budget. Without this a
+     * long build-and-test thread re-ships its whole corpus (hundreds of command
+     * outputs plus whole-file diffs) on every resume, which OOMs the editor's
+     * renderer — main has to encode and clone every byte on the way there, so
+     * the renderer's own ingestion budget can't save it. Mirrors the claude
+     * fork's MAIN_REPLAY_*_CAP_BYTES bound in acp-agent.ts.
+     *
+     * Returns false when this update did not fit: the caller stops the replay.
+     */
+    private async streamCappedHistoryUpdate(
+        session: ACPSessionConnection,
+        sessionId: string,
+        update: UpdateSessionEvent,
+        budget: ReplayBudgetState,
+        totalCapBytes = REPLAY_TOTAL_CAP_BYTES,
+    ): Promise<boolean> {
+        if (budget.truncated) return false;
+        const capped = capReplayUpdate(update);
+        if (budget.sentBytes + capped.bytes > totalCapBytes) {
+            budget.truncated = true;
+            logger.log(
+                `replay: truncated history for ${sessionId} after ${budget.sentCount} updates `
+                + `(${budget.sentBytes} bytes; next update ${capped.bytes} bytes would exceed the ${totalCapBytes} byte cap)`,
+            );
+            // Stop rather than fail the resume: the session still opens with
+            // its earlier turns intact. Say so instead of dropping the tail
+            // silently — this is history the user reads. Same shape as the
+            // claude fork's truncation notice.
+            await session.update({
+                sessionUpdate: "agent_message_chunk",
+                content: {
+                    type: "text",
+                    text: "History replay truncated: the rest of this session's history exceeds the "
+                        + "replay size limit.",
+                },
+            });
+            return false;
+        }
+        budget.sentBytes += capped.bytes;
+        budget.sentCount += 1;
+        await session.update(capped.update);
+        return true;
     }
 
     private async streamNativeThreadHistory(
@@ -2494,6 +2622,8 @@ export class CodexAcpServer {
         unreadableChildren: Set<string>,
         isOpen: () => boolean,
         interruptedTurnTails: ReadonlySet<string>,
+        budget: ReplayBudgetState,
+        userInputReplay: RequestUserInputReplay,
     ): Promise<void> {
         const session = new ACPSessionConnection(this.connection, sessionId);
         const announced = new Map<string, {generation: number; sessionId: string; terminal: boolean}>();
@@ -2540,6 +2670,10 @@ export class CodexAcpServer {
                                         unreadableChildren,
                                         isOpen,
                                         interruptedTurnTails,
+                                        budget,
+                                        // A child reads its own rollout; the parent's cards
+                                        // must not anchor on the child's items.
+                                        RequestUserInputReplay.empty(),
                                     );
                                 }
                                 catch (error) {
@@ -2590,7 +2724,9 @@ export class CodexAcpServer {
                 }
                 // The activity items above replay the lifecycle of a spawn. A control call is a tool call, as in the live session.
                 if (item.type === "collabAgentToolCall" && item.tool === "spawnAgent") continue;
-                await this.streamHistoryItem(session, item, sessionState, interruptedTurnTails);
+                if (!await this.streamHistoryItem(session, sessionId, item, sessionState, interruptedTurnTails, budget, userInputReplay)) {
+                    return;
+                }
             }
         }
         for (const child of announced.values()) {
