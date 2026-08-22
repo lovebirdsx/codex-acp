@@ -8,7 +8,10 @@ import type {
 import type {
     ConfigReadParams,
     ConfigReadResponse,
+    ConsumeAccountRateLimitResetCreditParams,
+    ConsumeAccountRateLimitResetCreditResponse,
     GetAccountParams,
+    GetAccountRateLimitsResponse,
     GetAccountResponse,
     ListMcpServerStatusParams,
     ListMcpServerStatusResponse,
@@ -600,6 +603,14 @@ export class CodexAppServerClient {
 
     async accountLogout(): Promise<LogoutAccountResponse> {
         return await this.sendRequest({ method: "account/logout", params: undefined });
+    }
+
+    async accountRateLimitsRead(): Promise<GetAccountRateLimitsResponse> {
+        return await this.sendRequest({ method: "account/rateLimits/read", params: undefined });
+    }
+
+    async accountRateLimitResetCreditConsume(params: ConsumeAccountRateLimitResetCreditParams): Promise<ConsumeAccountRateLimitResetCreditResponse> {
+        return await this.sendRequest({ method: "account/rateLimitResetCredit/consume", params: params });
     }
 
     async configRead(params: ConfigReadParams): Promise<ConfigReadResponse> {

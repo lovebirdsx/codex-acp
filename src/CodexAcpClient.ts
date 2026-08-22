@@ -28,6 +28,9 @@ import {sanitizeMcpServerName} from "./McpServerName";
 import type {
     AccountLoginCompletedNotification,
     AccountUpdatedNotification,
+    ConsumeAccountRateLimitResetCreditParams,
+    ConsumeAccountRateLimitResetCreditResponse,
+    GetAccountRateLimitsResponse,
     GetAccountResponse,
     ListMcpServerStatusResponse,
     Model,
@@ -328,6 +331,14 @@ export class CodexAcpClient {
 
     async getAccount(): Promise<GetAccountResponse> {
         return this.codexClient.accountRead({refreshToken: false});
+    }
+
+    async getAccountRateLimits(): Promise<GetAccountRateLimitsResponse> {
+        return this.codexClient.accountRateLimitsRead();
+    }
+
+    async consumeRateLimitResetCredit(params: ConsumeAccountRateLimitResetCreditParams): Promise<ConsumeAccountRateLimitResetCreditResponse> {
+        return this.codexClient.accountRateLimitResetCreditConsume(params);
     }
 
     async resumeSession(request: acp.ResumeSessionRequest, onSubscribed?: () => void): Promise<SessionMetadata> {

@@ -57,12 +57,17 @@ import {
     type SetSessionTitleResponse,
     type RewindSessionRequest,
     type RewindSessionResponse,
+    type ConsumeResetCreditRequest,
+    type ConsumeResetCreditResponse,
+    type SubscriptionUsageResponse,
     GOAL_CONTROL_METHOD,
     isExtMethodRequest,
     LEGACY_SET_SESSION_MODEL_METHOD,
     SESSION_STEERING_METHOD,
     SET_SESSION_TITLE_METHOD,
     REWIND_SESSION_METHOD,
+    SUBSCRIPTION_USAGE_METHOD,
+    CONSUME_RESET_CREDIT_METHOD,
 } from "./AcpExtensions";
 import {
     createCollabAgentToolCallUpdate,
@@ -319,6 +324,10 @@ export class CodexAcpServer {
                 return await this.setSessionTitle(this.parseSetSessionTitleParams(methodRequest.params));
             case REWIND_SESSION_METHOD:
                 return await this.rewindSession(methodRequest.params);
+            case SUBSCRIPTION_USAGE_METHOD:
+                return await this.readSubscriptionUsage();
+            case CONSUME_RESET_CREDIT_METHOD:
+                return await this.consumeRateLimitResetCredit(methodRequest.params);
         }
     }
 
@@ -1230,6 +1239,50 @@ export class CodexAcpServer {
             sessionId: sessionId,
             title: title,
         };
+    }
+
+    /**
+     * Reads the ChatGPT plan's rate-limit snapshot for the editor's
+     * official-subscription usage indicator. This only sanitizes the payload —
+     * normalization lives in the editor so the claude and codex forks cannot
+     * drift apart. An account without subscription rate limits (API key /
+     * gateway auth) is a normal outcome reported as `supported: false`, not an
+     * error, so the indicator can quietly hide instead of showing a failure.
+     */
+    async readSubscriptionUsage(): Promise<SubscriptionUsageResponse> {
+        let response;
+        try {
+            response = await this.runWithProcessCheck(() => this.codexAcpClient.getAccountRateLimits());
+        } catch (err) {
+            logger.log("Subscription usage unavailable", {error: String(err)});
+            return {vendor: "codex", supported: false, rateLimits: null, rateLimitsByLimitId: null, resetCredits: null};
+        }
+        const buckets = [response.rateLimits, ...Object.values(response.rateLimitsByLimitId ?? {})];
+        const summary = response.rateLimitResetCredits;
+        return {
+            vendor: "codex",
+            supported: buckets.some((bucket) => bucket != null && (bucket.primary !== null || bucket.secondary !== null)),
+            rateLimits: response.rateLimits ?? null,
+            rateLimitsByLimitId: response.rateLimitsByLimitId ?? null,
+            // availableCount is a Rust u64 (ts-rs bigint) and JSON.stringify throws on bigint.
+            resetCredits: summary ? {availableCount: String(summary.availableCount), credits: summary.credits} : null,
+        };
+    }
+
+    /**
+     * Redeems the next available rate-limit reset credit. `creditId` is omitted
+     * on purpose so the backend picks; the caller retries a transient failure
+     * with the SAME idempotencyKey, otherwise the retry burns a second credit.
+     */
+    async consumeRateLimitResetCredit(params: ConsumeResetCreditRequest): Promise<ConsumeResetCreditResponse> {
+        const idempotencyKey = typeof params.idempotencyKey === "string" ? params.idempotencyKey.trim() : "";
+        if (idempotencyKey.length === 0) {
+            throw RequestError.invalidParams();
+        }
+        logger.log("Rate-limit reset credit consume requested", {idempotencyKey});
+        const response = await this.runWithProcessCheck(() => this.codexAcpClient.consumeRateLimitResetCredit({idempotencyKey}));
+        logger.log("Rate-limit reset credit consume outcome", {idempotencyKey, outcome: response.outcome});
+        return {outcome: response.outcome};
     }
 
     /**
