@@ -15,6 +15,11 @@ import {
     ASYNC_TASK_STOP_METHOD,
     type AsyncTaskStopExtRequest,
 } from "./async-tasks/AsyncTaskExtension";
+import type {
+    ConsumeAccountRateLimitResetCreditOutcome,
+    RateLimitResetCredit,
+    RateLimitSnapshot,
+} from "./app-server/v2";
 import {z} from "zod";
 
 export {
@@ -66,6 +71,26 @@ export const SET_SESSION_TITLE_METHOD = "universe-editor/set_session_title";
  */
 export const REWIND_SESSION_METHOD = "universe-editor/rewind_session";
 
+/**
+ * Custom ACP request returning the official-subscription usage snapshot (the
+ * ChatGPT plan's rate-limit windows). Shared verbatim with the editor
+ * renderer's `acpExtMethods.ts` (`ACP_EXT_METHODS.subscriptionUsage`) — keep
+ * both in sync. Backed by the app-server's `account/rateLimits/read`. The fork
+ * only sanitizes the payload (see `availableCount`); normalization lives in the
+ * editor so the claude and codex forks cannot drift apart.
+ */
+export const SUBSCRIPTION_USAGE_METHOD = "universe-editor/subscription_usage";
+
+/**
+ * Custom ACP request redeeming one rate-limit reset credit, backed by the
+ * app-server's `account/rateLimitResetCredit/consume`. Shared verbatim with the
+ * editor renderer's `acpExtMethods.ts` (`ACP_EXT_METHODS.consumeResetCredit`).
+ * `creditId` is deliberately not exposed — the backend picks the next available
+ * credit. A transient failure must be retried with the SAME `idempotencyKey`,
+ * otherwise the retry burns a second credit.
+ */
+export const CONSUME_RESET_CREDIT_METHOD = "universe-editor/consume_reset_credit";
+
 export type LegacySessionModel = {
     modelId: string;
     name: string;
@@ -106,6 +131,39 @@ export type RewindSessionResponse = {
     deletions?: number;
 }
 
+export type SubscriptionUsageRequest = {}
+
+export type SubscriptionUsageResetCredits = {
+    /**
+     * The app-server types this as a Rust u64 (ts-rs emits `bigint`), and
+     * `JSON.stringify` throws on bigint — so it crosses the ACP wire as a
+     * decimal string and the editor parses it back.
+     */
+    availableCount: string;
+    credits: ReadonlyArray<RateLimitResetCredit> | null;
+}
+
+/**
+ * Vendor-native snapshot; the editor normalizes it. `supported: false` means the
+ * account has no subscription rate limits (API key / gateway auth, or the
+ * app-server refused the call) — a normal outcome, not an error.
+ */
+export type SubscriptionUsageResponse = {
+    vendor: "codex";
+    supported: boolean;
+    rateLimits: RateLimitSnapshot | null;
+    rateLimitsByLimitId: { [limitId: string]: RateLimitSnapshot | undefined } | null;
+    resetCredits: SubscriptionUsageResetCredits | null;
+}
+
+export type ConsumeResetCreditRequest = {
+    idempotencyKey: string;
+}
+
+export type ConsumeResetCreditResponse = {
+    outcome: ConsumeAccountRateLimitResetCreditOutcome;
+}
+
 export type LegacyNewSessionResponse = NewSessionResponse & {
     models?: LegacySessionModelState | null;
 }
@@ -127,6 +185,8 @@ export type ExtMethodRequest =
     | AsyncTaskStopExtRequest
     | SetSessionTitleExtRequest
     | RewindSessionExtRequest
+    | SubscriptionUsageExtRequest
+    | ConsumeResetCreditExtRequest
 
 export function isExtMethodRequest(request: { method: string, params: Record<string, unknown> }): request is ExtMethodRequest {
     return request.method === "authentication/status"
@@ -137,7 +197,9 @@ export function isExtMethodRequest(request: { method: string, params: Record<str
         || request.method === SESSION_STEERING_METHOD
         || request.method === ASYNC_TASK_STOP_METHOD
         || request.method === SET_SESSION_TITLE_METHOD
-        || request.method === REWIND_SESSION_METHOD;
+        || request.method === REWIND_SESSION_METHOD
+        || request.method === SUBSCRIPTION_USAGE_METHOD
+        || request.method === CONSUME_RESET_CREDIT_METHOD;
 }
 
 /**
@@ -170,6 +232,16 @@ export type SetSessionTitleExtRequest = {
 export type RewindSessionExtRequest = {
     method: typeof REWIND_SESSION_METHOD;
     params: RewindSessionRequest;
+}
+
+export type SubscriptionUsageExtRequest = {
+    method: typeof SUBSCRIPTION_USAGE_METHOD;
+    params: SubscriptionUsageRequest;
+}
+
+export type ConsumeResetCreditExtRequest = {
+    method: typeof CONSUME_RESET_CREDIT_METHOD;
+    params: ConsumeResetCreditRequest;
 }
 
 export async function legacySetSessionModel(
@@ -251,6 +323,10 @@ export const rewindSessionParamsParser = z.object({
     dryRun: z.boolean().optional(),
 }).passthrough();
 
+export const consumeResetCreditParamsParser = z.object({
+    idempotencyKey: z.string(),
+}).passthrough();
+
 export interface ExtensionMethodRegistration {
     readonly method: string;
     readonly parser: z.ZodType;
@@ -265,4 +341,6 @@ export const EXTENSION_METHOD_REGISTRATIONS: ReadonlyArray<ExtensionMethodRegist
     {method: GOAL_CONTROL_METHOD, parser: goalControlParamsParser},
     {method: ASYNC_TASK_STOP_METHOD, parser: asyncTaskStopParamsParser},
     {method: REWIND_SESSION_METHOD, parser: rewindSessionParamsParser},
+    {method: SUBSCRIPTION_USAGE_METHOD, parser: emptyExtensionParamsParser},
+    {method: CONSUME_RESET_CREDIT_METHOD, parser: consumeResetCreditParamsParser},
 ];

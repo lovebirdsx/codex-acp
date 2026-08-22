@@ -36,6 +36,8 @@ import {normalizeSessionTitle} from "./SessionTitle";
 import type {
     AccountLoginCompletedNotification,
     AccountUpdatedNotification,
+    ConsumeAccountRateLimitResetCreditParams,
+    ConsumeAccountRateLimitResetCreditResponse,
     GetAccountRateLimitsResponse,
     GetAccountResponse,
     ListMcpServerStatusParams,
@@ -541,6 +543,10 @@ export class CodexAcpClient {
 
     async getRateLimits(): Promise<GetAccountRateLimitsResponse> {
         return this.codexClient.accountRateLimitsRead();
+    }
+
+    async consumeRateLimitResetCredit(params: ConsumeAccountRateLimitResetCreditParams): Promise<ConsumeAccountRateLimitResetCreditResponse> {
+        return this.codexClient.accountRateLimitResetCreditConsume(params);
     }
 
     /**

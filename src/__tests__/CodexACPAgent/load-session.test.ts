@@ -1076,6 +1076,7 @@ describe("CodexACPAgent - loadSession", () => {
             availabilityNux: null,
             displayName: "GPT-5.2",
             description: "Test model",
+            modelSpecialty: null,
             hidden: false,
             supportedReasoningEfforts: [{ reasoningEffort: "medium", description: "Medium" }],
             defaultReasoningEffort: "medium",
@@ -1084,6 +1085,8 @@ describe("CodexACPAgent - loadSession", () => {
             additionalSpeedTiers: [],
             serviceTiers: [],
             defaultServiceTier: null,
+            multiAgentVersion: null,
+            availableAccessPrograms: null,
             isDefault: true,
         };
 
