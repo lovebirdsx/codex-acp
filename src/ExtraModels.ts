@@ -41,6 +41,32 @@ export function readExtraModelsMeta(meta: unknown): Array<string> {
 }
 
 /**
+ * Floor for an injected context window. codex triggers auto-compaction off this
+ * number, so a pathological small value (a typo'd `maxInputTokens: 1`, dirty
+ * gateway metadata) would compact on every single turn and make the session
+ * unusable with nothing pointing at the cause. Below the floor we ignore the
+ * payload and stay on codex's own fallback. No ceiling: an over-large window
+ * just means "never compact", the same risk class as the 272K fallback itself.
+ */
+const MIN_MODEL_CONTEXT_WINDOW = 1024;
+
+/**
+ * Per-session context window (in tokens) the client resolved for the current
+ * model, forwarded via top-level `_meta.modelContextWindow`. Returns null for an
+ * absent or malformed payload — a bad `_meta` must never fail session creation.
+ *
+ * The editor pre-resolves this single value (the current model's window) because
+ * the fork cannot know the active model id at config-assembly time — codex only
+ * reports it after `thread/start`. The claude fork ignores this key; it reads
+ * only `_meta.extraModels`.
+ */
+export function readModelContextWindowMeta(meta: unknown): number | null {
+    const value = (meta as {modelContextWindow?: unknown} | null | undefined)?.modelContextWindow;
+    if (typeof value !== "number" || !Number.isSafeInteger(value)) return null;
+    return value >= MIN_MODEL_CONTEXT_WINDOW ? value : null;
+}
+
+/**
  * A minimal catalogue entry for a client-supplied model id.
  *
  * `supportedReasoningEfforts` is deliberately empty: we know nothing about a

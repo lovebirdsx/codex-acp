@@ -538,6 +538,51 @@ describe('ACP server test', { timeout: 40_000 }, () => {
         });
     });
 
+    it('injects _meta.modelContextWindow into the session config, ignoring malformed values', async () => {
+        const setup = () => {
+            const mockFixture = createCodexMockTestFixture();
+            const codexAcpClient = mockFixture.getCodexAcpClient();
+            const codexAppServerClient = mockFixture.getCodexAppServerClient();
+            vi.spyOn(codexAppServerClient, "skillsExtraRootsSet").mockResolvedValue(undefined);
+            vi.spyOn(codexAppServerClient, "listSkills").mockResolvedValue({data: []});
+            const threadStartSpy = vi.spyOn(codexAppServerClient, "threadStart").mockResolvedValue({
+                thread: {id: "thread-id"} as any,
+                model: "gpt-5",
+                reasoningEffort: "medium",
+                serviceTier: null,
+            } as any);
+            vi.spyOn(codexAppServerClient, "listModels").mockResolvedValue({
+                data: [createTestModel({id: "gpt-5"})],
+                nextCursor: null,
+            });
+            return {codexAcpClient, threadStartSpy};
+        };
+
+        const valid = setup();
+        await valid.codexAcpClient.newSession({
+            cwd: "/workspace",
+            mcpServers: [],
+            _meta: {modelContextWindow: 128000},
+        });
+        expect(valid.threadStartSpy.mock.calls[0]![0].config?.["model_context_window"]).toBe(128000);
+
+        const absent = setup();
+        await absent.codexAcpClient.newSession({cwd: "/workspace", mcpServers: []});
+        expect(absent.threadStartSpy.mock.calls[0]![0].config).not.toHaveProperty("model_context_window");
+
+        // 512 is below MIN_MODEL_CONTEXT_WINDOW: a window that small would make
+        // codex auto-compact every turn, so it is rejected like a type error.
+        for (const bad of ["huge", 0, -5, 1.5, 512]) {
+            const malformed = setup();
+            await malformed.codexAcpClient.newSession({
+                cwd: "/workspace",
+                mcpServers: [],
+                _meta: {modelContextWindow: bad as any},
+            });
+            expect(malformed.threadStartSpy.mock.calls[0]![0].config).not.toHaveProperty("model_context_window");
+        }
+    });
+
     it('applies ACP additional directories to resumed and loaded sessions explicitly', async () => {
         const mockFixture = createCodexMockTestFixture();
         const codexAcpClient = mockFixture.getCodexAcpClient();

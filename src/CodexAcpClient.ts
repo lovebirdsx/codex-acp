@@ -25,6 +25,7 @@ import type {
 import type {ServiceTier} from "./app-server/ServiceTier";
 import type {JsonValue} from "./app-server/serde_json/JsonValue";
 import {ModelId} from "./ModelId";
+import {readModelContextWindowMeta} from "./ExtraModels";
 import {AgentMode} from "./AgentMode";
 import path from "node:path";
 import fs from "node:fs";
@@ -645,7 +646,7 @@ export class CodexAcpClient {
 
         const response = await this.resumeThread({
             excludeTurns: true,
-            config: await this.createSessionConfig(request.cwd, additionalDirectories, request.mcpServers ?? []),
+            config: await this.createSessionConfig(request.cwd, additionalDirectories, request.mcpServers ?? [], readModelContextWindowMeta(request._meta)),
             ...this.buildMemoryInstructions(request.cwd),
             cwd: request.cwd,
             modelProvider: await this.getResumeModelProvider(),
@@ -672,7 +673,7 @@ export class CodexAcpClient {
             codexClient: this.codexClient,
             refreshSkills: (cwd, directories) => this.refreshSkills(cwd, directories),
             createSessionConfig: (cwd, directories, mcpServers) =>
-                this.createSessionConfig(cwd, directories, mcpServers),
+                this.createSessionConfig(cwd, directories, mcpServers, readModelContextWindowMeta(request._meta)),
             getResumeModelProvider: () => this.getResumeModelProvider(),
             fetchAvailableModels: () => this.fetchAvailableModels(),
             createCurrentModelId: (models, model, reasoningEffort) =>
@@ -687,7 +688,7 @@ export class CodexAcpClient {
 
         const response = await this.resumeThread({
             excludeTurns: true,
-            config: await this.createSessionConfig(request.cwd, additionalDirectories, request.mcpServers ?? []),
+            config: await this.createSessionConfig(request.cwd, additionalDirectories, request.mcpServers ?? [], readModelContextWindowMeta(request._meta)),
             ...this.buildMemoryInstructions(request.cwd),
             cwd: request.cwd,
             modelProvider: await this.getResumeModelProvider(),
@@ -846,7 +847,7 @@ export class CodexAcpClient {
         await this.refreshSkills(request.cwd, additionalDirectories);
 
         const response = await this.codexClient.threadStart({
-            config: await this.createSessionConfig(request.cwd, additionalDirectories, request.mcpServers),
+            config: await this.createSessionConfig(request.cwd, additionalDirectories, request.mcpServers, readModelContextWindowMeta(request._meta)),
             ...this.buildMemoryInstructions(request.cwd),
             modelProvider: this.getModelProvider(),
             cwd: request.cwd,
@@ -989,7 +990,8 @@ export class CodexAcpClient {
     private async createSessionConfig(
         projectPath: string,
         additionalDirectories: string[],
-        mcpServers: Array<McpServer>
+        mcpServers: Array<McpServer>,
+        modelContextWindow: number | null
     ): Promise<JsonObject> {
         const sessionRoots = [projectPath, ...additionalDirectories];
         const activeProvider = this.gatewayConfig
@@ -1007,6 +1009,12 @@ export class CodexAcpClient {
         });
         const mergedConfig = {
             ...forceGitRootTurnDiffPaths(mergeGatewayConfig(this.config, this.gatewayConfig)),
+            // Fork addition: per-session context window override supplied by the
+            // client. Placed after the base config so it overrides any config.toml
+            // value. Injected per-session (not as a global config.toml field) to
+            // avoid codex#16068, where a global model_context_window breaks the
+            // auto-compaction token counter.
+            ...(modelContextWindow !== null ? {model_context_window: modelContextWindow} : {}),
             projects: Object.fromEntries(sessionRoots.map(root => [root, {
                 trust_level: "trusted",
             }])),

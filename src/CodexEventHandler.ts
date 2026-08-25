@@ -817,7 +817,20 @@ export class CodexEventHandler {
         );
     }
 
-    private createWarningEvent(event: WarningNotification): UpdateSessionEvent {
+    // Fork addition: the app-server emits this warning every turn for any model
+    // id absent from its built-in registry (gateway models such as
+    // deepseek-v4-flash), and upstream never dedupes it (codex#21070). Rendered
+    // as an agent message it floods the session, so drop it silently. The marker
+    // is independent of the model name, so a rename never breaks the match. The
+    // actual context-window fix is injected by the client via
+    // _meta.modelContextWindow.
+    private static readonly MODEL_METADATA_FALLBACK_MARKER = "not found. Defaulting to fallback metadata";
+
+    private createWarningEvent(event: WarningNotification): UpdateSessionEvent | null {
+        if (event.message.includes(CodexEventHandler.MODEL_METADATA_FALLBACK_MARKER)) {
+            logger.log("Dropped model-metadata fallback warning", {message: event.message});
+            return null;
+        }
         if (this.supportsNotices) {
             return createSessionNotice("warning", event.message.trim() || "Codex warning");
         }
