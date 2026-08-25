@@ -42,6 +42,7 @@ async function createSession(
     availableModels: Array<Model>,
     clientCapabilities?: acp.ClientCapabilities,
     additionalDirectories: string[] = [],
+    meta?: Record<string, unknown>,
 ) {
     const fixture = createCodexMockTestFixture();
     const codexAcpAgent = fixture.getCodexAcpAgent();
@@ -64,7 +65,7 @@ async function createSession(
     const response = await codexAcpAgent.newSession({
         cwd: "/test/cwd",
         mcpServers: [],
-        _meta: {additionalRoots: additionalDirectories},
+        _meta: {additionalRoots: additionalDirectories, ...(meta ?? {})},
     });
     return {fixture, codexAcpAgent, codexAcpClient, response};
 }
@@ -221,6 +222,105 @@ describe("Session config options", () => {
             "_meta.jetbrains.air.recommendedValue",
             "low",
         );
+    });
+
+
+    /**
+     * universe-editor extension: without these the in-session Model picker is
+     * unusable for anyone running codex through their own gateway.
+     */
+    describe("client-injected extra models (_meta.extraModels)", () => {
+        it("adds injected ids to the model picker alongside the catalogue", async () => {
+            const {fast, slow} = buildModels();
+            const {response} = await createSession("fast-model[medium]", [fast, slow], undefined, [], {
+                extraModels: ["deepseek-pro-v4"],
+            });
+
+            const modelOption = response.configOptions?.find(o => o.id === MODEL_CONFIG_ID);
+            expect((modelOption as any).options.map((o: any) => o.value)).toEqual([
+                "fast-model",
+                "slow-model",
+                "deepseek-pro-v4",
+            ]);
+        });
+
+        it("accepts a switch onto an injected model instead of throwing invalidParams", async () => {
+            const {fast} = buildModels();
+            const {codexAcpAgent} = await createSession("fast-model[medium]", [fast], undefined, [], {
+                extraModels: ["deepseek-pro-v4"],
+            });
+
+            await codexAcpAgent.setSessionConfigOption({
+                sessionId: "session-id",
+                configId: MODEL_CONFIG_ID,
+                value: "deepseek-pro-v4",
+            });
+
+            // The effort half copies the session's current effort — we know nothing
+            // about a gateway model's effort levels, so no value is invented.
+            expect(codexAcpAgent.getSessionState("session-id").currentModelId).toBe(
+                "deepseek-pro-v4[medium]",
+            );
+        });
+
+        it("lets the user switch away from an injected model and back again", async () => {
+            const {fast} = buildModels();
+            const {codexAcpAgent} = await createSession("fast-model[medium]", [fast], undefined, [], {
+                extraModels: ["deepseek-pro-v4"],
+            });
+
+            for (const value of ["deepseek-pro-v4", "fast-model", "deepseek-pro-v4"]) {
+                await codexAcpAgent.setSessionConfigOption({
+                    sessionId: "session-id",
+                    configId: MODEL_CONFIG_ID,
+                    value,
+                });
+            }
+
+            expect(codexAcpAgent.getSessionState("session-id").currentModelId).toBe(
+                "deepseek-pro-v4[medium]",
+            );
+        });
+
+        it("advertises no effort options for an injected model", async () => {
+            const {fast} = buildModels();
+            const {codexAcpAgent} = await createSession("fast-model[medium]", [fast], undefined, [], {
+                extraModels: ["deepseek-pro-v4"],
+            });
+
+            const result = await codexAcpAgent.setSessionConfigOption({
+                sessionId: "session-id",
+                configId: MODEL_CONFIG_ID,
+                value: "deepseek-pro-v4",
+            });
+
+            expect(result.configOptions?.some(o => o.id === REASONING_EFFORT_CONFIG_ID)).toBe(false);
+        });
+
+        it("does not duplicate an id the catalogue already has", async () => {
+            const {fast, slow} = buildModels();
+            const {response} = await createSession("fast-model[medium]", [fast, slow], undefined, [], {
+                extraModels: ["slow-model", "slow-model"],
+            });
+
+            const modelOption = response.configOptions?.find(o => o.id === MODEL_CONFIG_ID);
+            expect((modelOption as any).options.map((o: any) => o.value)).toEqual([
+                "fast-model",
+                "slow-model",
+            ]);
+            // The catalogue entry keeps its real metadata rather than a synthesized stub.
+            expect((modelOption as any).options[1].name).toBe("Slow model");
+        });
+
+        it("ignores a malformed payload instead of failing session creation", async () => {
+            const {fast} = buildModels();
+            const {response} = await createSession("fast-model[medium]", [fast], undefined, [], {
+                extraModels: "not-an-array",
+            });
+
+            const modelOption = response.configOptions?.find(o => o.id === MODEL_CONFIG_ID);
+            expect((modelOption as any).options.map((o: any) => o.value)).toEqual(["fast-model"]);
+        });
     });
 
     it("keeps the legacy models list as combined model/effort entries", async () => {
