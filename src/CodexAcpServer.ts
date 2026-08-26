@@ -2145,12 +2145,22 @@ export class CodexAcpServer {
      * error, so the indicator can quietly hide instead of showing a failure.
      */
     async readSubscriptionUsage(): Promise<SubscriptionUsageResponse> {
+        const unsupported: SubscriptionUsageResponse = {vendor: "codex", supported: false, rateLimits: null, rateLimitsByLimitId: null, resetCredits: null};
         let response;
         try {
+            // `account/rateLimits/read` answers from auth.json's account no matter which
+            // model provider the turn actually bills to, so a leftover `codex login`
+            // would make a custom-gateway session report the ChatGPT plan's windows.
+            // Only a ChatGPT account has a subscription readout to show.
+            const auth = await this.runWithProcessCheck(() => this.codexAcpClient.getAuthenticationStatus());
+            if (auth.type !== "chat-gpt") {
+                logger.log("Subscription usage skipped for non-subscription auth", {authType: auth.type});
+                return unsupported;
+            }
             response = await this.runWithProcessCheck(() => this.codexAcpClient.getRateLimits());
         } catch (err) {
             logger.log("Subscription usage unavailable", {error: String(err)});
-            return {vendor: "codex", supported: false, rateLimits: null, rateLimitsByLimitId: null, resetCredits: null};
+            return unsupported;
         }
         const buckets = [response.rateLimits, ...Object.values(response.rateLimitsByLimitId ?? {})];
         const summary = response.rateLimitResetCredits;

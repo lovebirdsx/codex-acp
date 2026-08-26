@@ -25,9 +25,14 @@ function bucket(usedPercent: number) {
     };
 }
 
+function chatGptAuth() {
+    return vi.fn().mockResolvedValue({type: "chat-gpt", email: "user@example.com"});
+}
+
 describe("readSubscriptionUsage", () => {
     it("serializes the u64 credit count as a decimal string", async () => {
         const server = serverWith({
+            getAuthenticationStatus: chatGptAuth(),
             getRateLimits: vi.fn().mockResolvedValue({
                 rateLimits: bucket(40),
                 rateLimitsByLimitId: null,
@@ -44,6 +49,7 @@ describe("readSubscriptionUsage", () => {
 
     it("reports supported when any bucket carries a window", async () => {
         const server = serverWith({
+            getAuthenticationStatus: chatGptAuth(),
             getRateLimits: vi.fn().mockResolvedValue({
                 rateLimits: null,
                 rateLimitsByLimitId: {gpt: bucket(10)},
@@ -60,6 +66,7 @@ describe("readSubscriptionUsage", () => {
 
     it("reports unsupported for an API-key account with no windows", async () => {
         const server = serverWith({
+            getAuthenticationStatus: chatGptAuth(),
             getRateLimits: vi.fn().mockResolvedValue({
                 rateLimits: null,
                 rateLimitsByLimitId: null,
@@ -70,8 +77,35 @@ describe("readSubscriptionUsage", () => {
         expect((await server.readSubscriptionUsage()).supported).toBe(false);
     });
 
+    // A leftover `codex login` keeps auth.json's ChatGPT account around, and
+    // `account/rateLimits/read` answers from it even when the turn bills to a
+    // custom gateway — reporting those windows would show the subscription
+    // percentage for a session the plan does not pay for.
+    it.each([
+        {type: "gateway", name: "codex-gateway"} as const,
+        {type: "api-key"} as const,
+        {type: "unauthenticated"} as const,
+    ])("reports unsupported for $type auth even when the account has windows", async (auth) => {
+        const getRateLimits = vi.fn().mockResolvedValue({
+            rateLimits: bucket(12),
+            rateLimitsByLimitId: null,
+            rateLimitResetCredits: null,
+        });
+        const server = serverWith({
+            getAuthenticationStatus: vi.fn().mockResolvedValue(auth),
+            getRateLimits,
+        });
+
+        const response = await server.readSubscriptionUsage();
+
+        expect(response.supported).toBe(false);
+        expect(response.rateLimits).toBeNull();
+        expect(getRateLimits).not.toHaveBeenCalled();
+    });
+
     it("degrades to unsupported instead of failing the request", async () => {
         const server = serverWith({
+            getAuthenticationStatus: chatGptAuth(),
             getRateLimits: vi.fn().mockRejectedValue(new Error("app-server is gone")),
         });
 
