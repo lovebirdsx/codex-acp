@@ -321,6 +321,24 @@ describe("Session config options", () => {
             const modelOption = response.configOptions?.find(o => o.id === MODEL_CONFIG_ID);
             expect((modelOption as any).options.map((o: any) => o.value)).toEqual(["fast-model"]);
         });
+
+        it("marks a catalogue model as known to codex", async () => {
+            const {fast, slow} = buildModels();
+            const {response} = await createSession("fast-model[medium]", [fast, slow], undefined, [], {
+                extraModels: ["deepseek-pro-v4"],
+            });
+
+            expect((response as any)._meta.codex.modelKnownInCatalog).toBe(true);
+        });
+
+        it("does not mark an extraModels-only model as known to codex", async () => {
+            const {fast} = buildModels();
+            const {response} = await createSession("deepseek-pro-v4[medium]", [fast], undefined, [], {
+                extraModels: ["deepseek-pro-v4"],
+            });
+
+            expect((response as any)._meta.codex.modelKnownInCatalog).toBe(false);
+        });
     });
 
     it("keeps the legacy models list as combined model/effort entries", async () => {

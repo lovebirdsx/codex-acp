@@ -209,6 +209,7 @@ export interface SessionState {
     totalTokenUsage: TokenCount | null;
     subagentTokenUsage: Map<string, TokenCount>;
     modelContextWindow: number | null;
+    modelKnownInCatalog: boolean;
     rateLimits: RateLimitsMap | null;
     account: Account | null;
     authConfigured: boolean;
@@ -849,6 +850,7 @@ export class CodexAcpServer {
             totalTokenUsage: null,
             subagentTokenUsage: new Map(),
             modelContextWindow: null,
+            modelKnownInCatalog: this.isModelInCatalogue(catalogueModels, currentModelId),
             rateLimits: null,
             account: authState.account,
             authConfigured: authState.authConfigured,
@@ -1113,6 +1115,7 @@ export class CodexAcpServer {
             models: modelState,
             modes: modeState,
             ...this.createSessionConfigOptionsResponse(this.getSessionState(sessionId)),
+            ...this.createSessionModelMeta(this.getSessionState(sessionId)),
         };
     }
 
@@ -1132,6 +1135,7 @@ export class CodexAcpServer {
             models: modelState,
             modes: modeState,
             ...this.createSessionConfigOptionsResponse(this.getSessionState(sessionId)),
+            ...this.createSessionModelMeta(this.getSessionState(sessionId)),
         };
     }
 
@@ -1267,6 +1271,7 @@ export class CodexAcpServer {
             models: modelState,
             modes: modeState,
             ...this.createSessionConfigOptionsResponse(this.getSessionState(sessionId)),
+            ...this.createSessionModelMeta(this.getSessionState(sessionId)),
         };
     }
 
@@ -2350,6 +2355,36 @@ export class CodexAcpServer {
         );
     }
 
+    /**
+     * universe-editor extension: does the session's model come from the app-server
+     * catalogue (`model/list`), i.e. does codex know its context window?
+     *
+     * MUST be passed the RAW catalogue, before `withExtraModels` mixes in the
+     * client's injected ids — after that the two are indistinguishable, which is
+     * the whole reason the client cannot answer this itself. Reported back via
+     * `_meta.codex.modelKnownInCatalog` on session open so the editor stops
+     * telling users to declare `maxInputTokens` for models codex already knows;
+     * see createSessionModelMeta.
+     */
+    private isModelInCatalogue(catalogueModels: Model[], currentModelId: string): boolean {
+        return this.findCurrentModel(catalogueModels, currentModelId) !== undefined;
+    }
+
+    /**
+     * universe-editor extension: session-open response `_meta` carrying the
+     * catalogue verdict above. Namespaced under `codex` because it is a
+     * fork-specific fact the claude fork has no analogue for.
+     */
+    private createSessionModelMeta(sessionState: SessionState): {
+        _meta: {[key: string]: unknown};
+    } {
+        return {
+            _meta: {
+                codex: {modelKnownInCatalog: sessionState.modelKnownInCatalog},
+            },
+        };
+    }
+
     private createModelState(availableModels: Model[], selectedModelId: string): LegacySessionModelState {
         const allowedModels = availableModels
             .flatMap((model) =>
@@ -2449,6 +2484,7 @@ export class CodexAcpServer {
             totalTokenUsage: null,
             subagentTokenUsage: new Map(),
             modelContextWindow: null,
+            modelKnownInCatalog: this.isModelInCatalogue(catalogueModels, currentModelId),
             rateLimits: null,
             account: authState.account,
             authConfigured: authState.authConfigured,

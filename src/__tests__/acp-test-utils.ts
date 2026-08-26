@@ -415,6 +415,7 @@ export function createTestSessionState(overrides?: Partial<SessionState>): Sessi
         totalTokenUsage: null,
         subagentTokenUsage: new Map(),
         modelContextWindow: null,
+        modelKnownInCatalog: false,
         rateLimits: null,
         account: null,
         authConfigured: overrides?.account !== undefined ? overrides.account !== null : false,
