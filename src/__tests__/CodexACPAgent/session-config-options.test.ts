@@ -297,6 +297,50 @@ describe("Session config options", () => {
             expect(result.configOptions?.some(o => o.id === REASONING_EFFORT_CONFIG_ID)).toBe(false);
         });
 
+        it("fills an injected model's effort levels from _meta.extraModelEffort", async () => {
+            const {fast} = buildModels();
+            const {codexAcpAgent, response} = await createSession("fast-model[medium]", [fast], undefined, [], {
+                extraModels: ["deepseek-pro-v4"],
+                extraModelEffort: [{id: "deepseek-pro-v4", effortLevels: ["low", "medium", "high"]}],
+            });
+
+            expect(response.models?.availableModels.map(m => m.modelId)).toEqual([
+                "fast-model[low]",
+                "fast-model[medium]",
+                "fast-model[high]",
+                "deepseek-pro-v4[low]",
+                "deepseek-pro-v4[medium]",
+                "deepseek-pro-v4[high]",
+            ]);
+
+            // The current effort is declared, so the synthesized default keeps it.
+            await codexAcpAgent.setSessionConfigOption({
+                sessionId: "session-id",
+                configId: MODEL_CONFIG_ID,
+                value: "deepseek-pro-v4",
+            });
+            expect(codexAcpAgent.getSessionState("session-id").currentModelId).toBe(
+                "deepseek-pro-v4[medium]",
+            );
+        });
+
+        it("falls back to the first declared effort when the current effort is undeclared", async () => {
+            const {fast} = buildModels();
+            const {codexAcpAgent} = await createSession("fast-model[high]", [fast], undefined, [], {
+                extraModels: ["deepseek-pro-v4"],
+                extraModelEffort: [{id: "deepseek-pro-v4", effortLevels: ["low", "medium"]}],
+            });
+
+            await codexAcpAgent.setSessionConfigOption({
+                sessionId: "session-id",
+                configId: MODEL_CONFIG_ID,
+                value: "deepseek-pro-v4",
+            });
+            expect(codexAcpAgent.getSessionState("session-id").currentModelId).toBe(
+                "deepseek-pro-v4[low]",
+            );
+        });
+
         it("does not duplicate an id the catalogue already has", async () => {
             const {fast, slow} = buildModels();
             const {response} = await createSession("fast-model[medium]", [fast, slow], undefined, [], {

@@ -42,7 +42,7 @@ import type {
 import type {RateLimitsMap} from "./RateLimitsMap";
 import {ModelId} from "./ModelId";
 import {normalizeSessionTitle} from "./SessionTitle";
-import {appendExtraModels, readExtraModelsMeta} from "./ExtraModels";
+import {appendExtraModels, readExtraModelEffortMeta, readExtraModelsMeta} from "./ExtraModels";
 import {AgentMode, MODE_CONFIG_ID} from "./AgentMode";
 import {
     COLLABORATION_MODE_CONFIG_ID,
@@ -2352,6 +2352,7 @@ export class CodexAcpServer {
             models,
             readExtraModelsMeta(meta),
             ModelId.fromString(currentModelId).effort,
+            readExtraModelEffortMeta(meta),
         );
     }
 

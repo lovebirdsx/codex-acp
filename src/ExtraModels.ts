@@ -41,6 +41,37 @@ export function readExtraModelsMeta(meta: unknown): Array<string> {
 }
 
 /**
+ * Per-model reasoning-effort levels the client declared, forwarded via top-level
+ * `_meta.extraModelEffort`. Keyed by model id; the first declaration for an id
+ * wins. An absent or malformed payload degrades to an empty map — a bad `_meta`
+ * must never fail session creation.
+ */
+export function readExtraModelEffortMeta(meta: unknown): Map<string, string[]> {
+    const value = (meta as {extraModelEffort?: unknown} | null | undefined)?.extraModelEffort;
+    if (!Array.isArray(value)) return new Map();
+    const out = new Map<string, string[]>();
+    for (const entry of value) {
+        if (typeof entry !== "object" || entry === null) continue;
+        const {id, effortLevels} = entry as {id?: unknown; effortLevels?: unknown};
+        if (typeof id !== "string" || !Array.isArray(effortLevels)) continue;
+        const trimmedId = id.trim();
+        if (!trimmedId || out.has(trimmedId)) continue;
+        const levels: string[] = [];
+        const seen = new Set<string>();
+        for (const level of effortLevels) {
+            if (typeof level !== "string") continue;
+            const trimmed = level.trim();
+            if (!trimmed || seen.has(trimmed)) continue;
+            seen.add(trimmed);
+            levels.push(trimmed);
+        }
+        out.set(trimmedId, levels);
+        if (out.size >= MAX_EXTRA_MODELS) break;
+    }
+    return out;
+}
+
+/**
  * Floor for an injected context window. codex triggers auto-compaction off this
  * number, so a pathological small value (a typo'd `maxInputTokens: 1`, dirty
  * gateway metadata) would compact on every single turn and make the session
@@ -69,15 +100,25 @@ export function readModelContextWindowMeta(meta: unknown): number | null {
 /**
  * A minimal catalogue entry for a client-supplied model id.
  *
- * `supportedReasoningEfforts` is deliberately empty: we know nothing about a
- * gateway model's effort levels, and advertising guesses would offer the user
- * switches the endpoint may reject. `defaultReasoningEffort` copies the effort
- * the session is currently on rather than a hardcoded `"medium"` — it becomes the
- * effort half of `ModelId` (`gateway-model[<effort>]`) when the user selects this
- * entry, and a gateway that only accepts what it was already given must not be
- * handed a value out of nowhere.
+ * `supportedReasoningEfforts` comes from the client's declared effort levels and
+ * stays empty when absent — we cannot invent levels for a gateway model, and
+ * advertising guesses would offer the user switches the endpoint may reject.
+ * When levels are declared, `defaultReasoningEffort` is the session's current
+ * effort if declared, otherwise the first declared level — so the default always
+ * sits inside `supportedReasoningEfforts` (a default outside it would make
+ * `findSupportedEffort` fall back to an undeclared value). Without declared
+ * levels it copies the effort the session is currently on rather than a
+ * hardcoded `"medium"` — it becomes the effort half of `ModelId`
+ * (`gateway-model[<effort>]`) when the user selects this entry, and a gateway
+ * that only accepts what it was already given must not be handed a value out of
+ * nowhere.
  */
-export function synthesizeExtraModel(id: string, currentEffort: ReasoningEffort): Model {
+export function synthesizeExtraModel(
+    id: string,
+    currentEffort: ReasoningEffort,
+    effortLevels?: string[],
+): Model {
+    const declaredLevels = effortLevels ?? [];
     return {
         id,
         model: id,
@@ -92,8 +133,10 @@ export function synthesizeExtraModel(id: string, currentEffort: ReasoningEffort)
         multiAgentVersion: null,
         availableAccessPrograms: null,
         hidden: false,
-        supportedReasoningEfforts: [],
-        defaultReasoningEffort: currentEffort,
+        supportedReasoningEfforts: declaredLevels.map((l) => ({reasoningEffort: l, description: ""})),
+        defaultReasoningEffort: declaredLevels.length > 0
+            ? (declaredLevels.includes(currentEffort) ? currentEffort : declaredLevels[0]!)
+            : currentEffort,
         // Permissive on purpose, matching the fork's own fallback for an
         // uncatalogued current model: these are only used to *reject* prompts
         // locally, so guessing "text" would block images a gateway does accept.
@@ -112,6 +155,7 @@ export function appendExtraModels(
     models: Array<Model>,
     extras: Array<string>,
     currentEffort: ReasoningEffort,
+    effortByModel?: Map<string, string[]>,
 ): Array<Model> {
     if (extras.length === 0) return models;
     const result = [...models];
@@ -119,7 +163,7 @@ export function appendExtraModels(
     for (const id of extras) {
         if (seen.has(id)) continue;
         seen.add(id);
-        result.push(synthesizeExtraModel(id, currentEffort));
+        result.push(synthesizeExtraModel(id, currentEffort, effortByModel?.get(id)));
     }
     return result;
 }
