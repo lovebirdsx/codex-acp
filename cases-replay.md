@@ -16,16 +16,35 @@
 
 live prompt 的 wire 顺序是图片在前文本在后（`buildPromptItems` 保序），但 `thread/resume` 重建的 `userMessage.content` 把 text input 排在 image input 前——verbatim 重放会让恢复出的消息把图片渲染在用户文本之后。修复：`createUserMessageUpdates` 用稳定排序把 image/localImage 输入的 chunk 提到 text 之前（`userInputReplayOrder`）；`userInputToContentBlocks` 的 `image` case 对 `data:` URL（`buildPromptItems` 给粘贴图存的形态）经 `parseImageDataUrl` 还原为真正的 ACP `image` block（`{type:'image', data, mimeType}`），使恢复后的图片走与 live 一致的 ImageRow 渲染而非文本内联链接；http(s) URL 与 localImage 仍降级为文本链接。配套测试 `load-session.test.ts`「replays image inputs ahead of text」；`data/load-session-history.json` 快照中 user chunk 顺序随之变为 image 链接在前。
 
-## 历史回放 `request_user_input` 提问卡片（已废弃）
+## 历史回放 `request_user_input` 提问卡片
 
-旧 fork 在 `ResponseItemHistoryFallback.ts` 里对 `function_call`（name=`request_user_input`）特判，从 rollout JSONL 重建提问卡片。上游 typed-item 历史重构后该模块整个删除，回放只读 `thread/turns/list` + `thread/items/list` 的 typed items——其中既无 request 的 questions 也无答案（`functionCallOutput` 项连上游都直接跳过），**恢复会话不再显示历史提问卡片**，该能力无法保留。
+（`src/RequestUserInputReplay.ts` + `src/ReplayFileRead.ts`；接线在 `src/CodexAcpServer.ts` `streamThreadHistory` → `streamHistoryItem` / `streamRemainingUserInputCards`）
+
+live 侧的提问卡片（见下节）必须能在恢复会话里重放，但 typed-item 历史里**既没有 request 的 questions 也没有答案**：`thread/turns/list` + `thread/items/list` 不重建 elicitation，`functionCallOutput` 项也被上游跳过（用真实 app-server 探针确认过 typed items 里完全没有这对调用）。旧 fork 的 `ResponseItemHistoryFallback.ts` 对 `function_call`（name=`request_user_input`）特判重建卡片；上游 typed-item 重构把整个模块（连同其中被判定多余的 shell 解析）删掉了，回放半边随之丢失。
+
+保留方式：**只补回这一对**，不恢复旧的整份 rollout shell 解析（`d4c3c9d`/`39aa2b4`/`d933b3f` 三个 shell 补丁保持删除）。`RequestUserInputReplay.ts` 从 rollout JSONL（`Thread.path`，`thread/resume` 返回）里扫出 `function_call`/`function_call_output` 对，按两个存储共享的锚点插回 typed 流：
+
+- 锚点键：tool item id == rollout `call_id`（`call:<id>`）；user item `clientId` == rollout `event_msg.user_message.client_id`（`user:<id>`，真实 app-server 探针验证相等）；agent message 用**有界文本键**（`agent:<len>:<前 256 字符>`），空文本不成锚。
+- 顺序：锚点按 rollout 出现顺序入数组 + 出现次数索引 + 游标，重复键（两条同文 agent message）按顺序消费，避免错位。
+- 重放位置：typed 流走到「卡片之后第一个锚点」对应的 item 时先发卡片（`takeBefore`），否则在历史末尾兜底（`takeRemaining`）。
+- 两个截断守卫（typed 流不是完整 rollout 的情况）：rewind 只截掉较新的 turn、rollout 仍保留——兜底时只发「其 turn 的开头 user message 确实被重放过」的卡片；resume 边界让 typed 流从中间开始——窗口打开时丢弃**结束于第一个重放 item 之前**的卡片（那段历史在上一次读取时已发过）。
+- 渲染与 live 完全一致：复用 `RequestUserInputHistory.ts` 的 `createUserInputToolCallEvent` / `createUserInputAnswerUpdate`（同一对 `tool_call`+`tool_call_update`），并走同一份回放字节预算 `streamCappedHistoryUpdate`。
+- 失败绝不致命：rollout 缺失/超限/读不出（`readFileWithinCap`，stat 先判 + `REPLAY_ROLLOUT_READ_CAP_BYTES=64MB`）只丢卡片，不 fail 会话。
+
+配套测试：`RequestUserInputReplay.test.ts`（锚点/顺序/重复键/rewind/边界/坏行）、`ReplayFileRead.test.ts`（超限不读）、`load-session.test.ts`「replays a request_user_input rollout pair…」（legacy 全链路：卡片在 commentary 与 final answer 之间、答案文本 `**答案**：6`、恰好一对 update）、「replays the question card on the paginated history the editor reads」、「drops the question cards of the turns a rewind removed from the thread」、「loads a session whose rollout cannot be read, without the question cards」（先补测试证实回退：无接线时前三个用例失败）。
 
 ## live `request_user_input` 留痕 + 答案折叠
 
 （`src/CodexElicitationHandler.ts`）
 
-- **live 留痕**：app-server 从不把 request_user_input 暴露为 thread item，elicitation 卡片一 settle 提问就从客户端 timeline 消失。`handleUserInput` 在回答（含 decline/cancel/自动超时，均记 `（跳过）`）后调 `publishUserInputCard` 补发 `tool_call`+`tool_call_update` 对，把问题、选项与答案留在会话时间线里；渲染函数（`createUserInputToolCallEvent` / `createUserInputAnswerUpdate` / `UserInputQuestion`）原在 `ResponseItemHistoryFallback.ts`，该模块随上游 typed-item 重构删除后移入 `RequestUserInputHistory.ts`；sessionId 取 `params.threadId`（子 agent 路由会把它改写成 ACP session id）。客户端不支持 form elicitation 时不发（从未提问）。配套测试 `elicitation-events.test.ts`「publishes a question card to the session timeline…」。
-- **答案折叠已上游化**：旧 fork 把 isOther 问题里用户既选选项又填备注的答案折叠成 `<选项>（补充：<备注>）` 单条 answer（`mergeUserInputAnswer`）。上游 #570/#577 采用自己的 AIR 约定（`None of the above` + `user_note: <文本>` 两条 answer），fork 的折叠实现已删除、跟随上游。
+- **live 留痕**：app-server 从不把 request_user_input 暴露为 thread item，elicitation 卡片一 settle 提问就从客户端 timeline 消失。`handleUserInput` 在回答（含 decline/cancel/自动超时，均记 `（跳过）`）后调 `publishUserInputCard` 补发 `tool_call`+`tool_call_update` 对，把问题、选项与答案留在会话时间线里；渲染函数（`createUserInputToolCallEvent` / `createUserInputAnswerUpdate` / `UserInputQuestion`）现居 `RequestUserInputHistory.ts`（live 与回放共用）；sessionId 取 `params.threadId`（子 agent 路由会把它改写成 ACP session id）。客户端不支持 form elicitation 时不发（从未提问）。配套测试 `elicitation-events.test.ts`「publishes a question card to the session timeline…」。
+- **答案折叠：AIR 走上游约定，非 AIR 保留 fork 折叠**：上游 #570/#577 把 note 字段从 `__other` 改名 `_note`，并用 `None of the above` + `user_note: <文本>` 两条 answer 表达「选了 Other 并补充」。fork 的 `mergeUserInputAnswer` 曾把这个折叠成 `<选项>（补充：<备注>）` 单条 answer。现状：**AIR 客户端（`airClient`）保持上游原样**（`None of the above` / `user_note:` 两条，不破上游用法）；**非 AIR 客户端（编辑器）用 fork 的折叠**——isOther 问题的选项里仍额外提供 `None of the above`（编辑器没有「自由回答」输入框，靠它表达选「其他」），选中它 + 备注 → 只发备注文本；选了具体选项 + 备注 → `<选项>（补充：<备注>）`。`_note` 字段名沿用上游新命名。live 与回放共用同一渲染，恢复会话折叠结果一致。
+
+## 官方 Codex app 迁成 paginated 后的 `session/load`（已上游化）
+
+旧世界：codex 0.146 起会把官方 app 打开过的 rollout 迁成 paginated history，`thread/resume` 成功但 `thread/read(includeTurns=true)` 直接拒绝；当时 fork 生成类型停留在 0.145（没有 `thread/turns/list`），只能在 resume 后捕获该错误、放弃 turns，让 `streamThreadHistory` 从 rollout JSONL 兜底重放（`includeAllItems`），并且在空 turns 时绕开 `mergeHistoryUpdates`、空 fallback 时大声失败，禁止打开空白会话。
+
+上游 typed-item 重构后这整套兜底已删除：`loadSession` 直接按 `historyMode` 分支——paginated 走 `thread/turns/list` + `thread/items/list`（游标来自 resume 的 `itemsBackwardsCursor`），legacy 走一次 `threadReadWithHistory`（`src/CodexAcpClient.ts`）；JSONL fallback、`skippedPaginatedThreadRead`、`isPaginatedThreadReadError` 与对应的三个 load-session 用例一并删除。回放仍读 rollout JSONL，但**只为 `request_user_input` 提问卡片**（见上文，`RequestUserInputReplay.ts`），其它历史一律来自 typed items。
 
 ## 历史回放字节预算
 
@@ -35,4 +54,4 @@ live prompt 的 wire 顺序是图片在前文本在后（`buildPromptItems` 保�
 
 - `ReplayBudget.ts`：`capReplayUpdate(update, maxFieldBytes=1MB)` **递归遍历 update 的所有字符串字段**做截断（**刻意不按 item 类型 switch**——任何 thread item 类型新加重字段当天即被覆盖，不会静默绕过），返回截断后字节数供累计记账；`REPLAY_TOTAL_CAP_BYTES=96MB`。`streamCappedHistoryUpdate` 逐条 `capReplayUpdate` + 累计，超限时 logger 记录并发一条 `agent_message_chunk` 说明后令 `streamHistoryItem` 返回 false，两条回放路径（legacy 循环与 `streamNativeThreadHistory` 的嵌套子会话）都据此提前 return（**从头发、超限停 = 丢较新的尾部**，与 claude fork 同向；不 fail 整个 resume，会话仍带较早历史打开）。预算对象 `ReplayBudgetState` 由 `streamThreadHistory` 创建，嵌套子会话共用同一份。
 - 配套测试 `src/__tests__/ReplayBudget.test.ts`（5 例：小 update 保持引用同一性 / 命令输出在 text block 与 rawOutput **两份**都被截断 / diff 双侧截断 / 巨型 payload 记账受 cap 约束 / 循环引用不爆栈）。
-- **上游已吸收的部分**：旧 fork 另有 `ReplayFileRead.ts`（`readFileWithinCap` stat 先判再读）守两个磁盘读——回放重建 diff 时读文件全文、rollout fallback 读整份 JSONL。typed-item 重构后回放不再读磁盘（diff 由 codex 的 `FileUpdateChange.diff` 重建，上游 `FileChangeReporter` 自带 `fitsDiffLimit` 尺寸闸），该模块与其测试一并删除；旧 `file-change-events.test.ts` 的 fs 桩踩坑随之失效。
+- **ReplayFileRead.ts（保留）**：`readFileWithinCap`（stat 先判再读，`REPLAY_ROLLOUT_READ_CAP_BYTES=64MB`）现只守提问卡片那一次 rollout 读取——超限文件绝不物化，只丢卡片。旧 fork 守的两个磁盘读（回放重建 diff 读文件全文、rollout fallback 读整份 JSONL）里，前者已随 typed-item 重构消失（diff 由 codex 的 `FileUpdateChange.diff` 重建，上游 `FileChangeReporter` 自带 `fitsDiffLimit` 尺寸闸）；配套测试 `src/__tests__/ReplayFileRead.test.ts`。
