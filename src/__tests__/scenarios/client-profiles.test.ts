@@ -74,6 +74,42 @@ describe("AIR golden snapshots", () => {
 
 const RECORD_BASELINE = process.env["RECORD_SCENARIO_BASELINE"] === "1";
 
+/**
+ * fork: the `_meta.codex` keys the adapter adds on its own. Only these are removed from a
+ * session response; every other key under `codex` (and every other namespace of `_meta`) is
+ * upstream's and must survive, or a new upstream key would silently drop out of the baseline
+ * comparison instead of failing.
+ */
+const FORK_SESSION_META_CODEX_KEYS = ["modelKnownInCatalog"];
+
+/**
+ * fork: the additions the adapter sends to every client, whatever its profile. They are not part of
+ * the baseline, so the comparison removes them from the recording: the editor capability
+ * advertisement, the `modelKnownInCatalog` bit of the session responses, and the MCP startup
+ * status notification. The AIR goldens keep them.
+ */
+function withoutForkAdditions(messages: RecordedMessage[]): RecordedMessage[] {
+    return messages.flatMap((message): RecordedMessage[] => {
+        if (message.method === "_universe/mcp_server_status") return [];
+        const params = message.params as Record<string, any>;
+        if (message.direction !== "response") return [message];
+        if (message.method === "initialize") {
+            const capabilities = params["agentCapabilities"] as Record<string, any>;
+            const meta = {...(capabilities["_meta"] as Record<string, any> | undefined)};
+            delete meta["universe-editor/capabilities"];
+            return [{...message, params: {...params, agentCapabilities: {...capabilities, _meta: meta}}}];
+        }
+        if (message.method !== "session/new" && message.method !== "session/load") return [message];
+        const meta = {...(params["_meta"] as Record<string, any> | undefined)};
+        const codex = {...(meta["codex"] as Record<string, any> | undefined)};
+        for (const key of FORK_SESSION_META_CODEX_KEYS) delete codex[key];
+        if (Object.keys(codex).length > 0) meta["codex"] = codex;
+        else delete meta["codex"];
+        const {_meta: _forkMeta, ...rest} = params;
+        return [{...message, params: Object.keys(meta).length > 0 ? {...rest, _meta: meta} : rest}];
+    });
+}
+
 function baselineFile(profile: ProfileName, name: string): string {
     return path.join(path.dirname(fileURLToPath(import.meta.url)), "data", "baseline", profile, `${name}.jsonl`);
 }
@@ -91,11 +127,32 @@ describe("clients that are not AIR, compared with the baseline", () => {
         for (const each of SCENARIOS) {
             it.skipIf(RECORD_BASELINE)(`${profile}: ${each.name} gets the baseline messages with the allowed differences`, () => {
                 const baseline = fromJsonLines(readBaseline(profile, each.name));
-                expect(lines(mergedReports(withOutputOnce(recording(profile, each.name)))))
+                expect(lines(mergedReports(withOutputOnce(withoutForkAdditions(recording(profile, each.name))))))
                     .toEqual(lines(mergedReports(withOutputOnce(expectedFromBaseline(each.name, baseline)))));
             });
         }
     }
+
+    it("removes only the fork keys of a session response and keeps every upstream one", () => {
+        const forkKey = FORK_SESSION_META_CODEX_KEYS[0]!;
+        const sessionResponse = (method: string, meta?: Record<string, unknown>): RecordedMessage =>
+            ({direction: "response", method, params: meta === undefined ? {} : {_meta: meta}});
+        for (const method of ["session/new", "session/load"]) {
+            expect(withoutForkAdditions([sessionResponse(method, {codex: {[forkKey]: true}})]))
+                .toEqual([{direction: "response", method, params: {}}]);
+            expect(withoutForkAdditions([sessionResponse(method, {
+                codex: {[forkKey]: true, upstreamKey: "kept"},
+                version: "9.9.9",
+            })]))
+                .toEqual([{
+                    direction: "response",
+                    method,
+                    params: {_meta: {codex: {upstreamKey: "kept"}, version: "9.9.9"}},
+                }]);
+        }
+        expect(withoutForkAdditions([sessionResponse("session/new", {upstreamOnly: 1})]))
+            .toEqual([{direction: "response", method: "session/new", params: {_meta: {upstreamOnly: 1}}}]);
+    });
 
     it("catches a permission request that omits the kind of a reported tool call", () => {
         const started: RecordedMessage = {
@@ -892,7 +949,14 @@ describe("AIR", () => {
     it("gets no key of the pre-contract shape", () => {
         const text = SCENARIOS.map(each => JSON.stringify(recording("air", each.name))).join("\n");
         expect(text).not.toContain("formatted_output");
-        expect(text).not.toContain("\"codex\"");
+        // fork: `_meta.codex.modelKnownInCatalog` is the fork's own addition; every other
+        // `codex`-namespaced metadata key belongs to the pre-contract shape the AIR contract dropped.
+        const codexKeys = metaObjects(SCENARIOS.map(each => recording("air", each.name)))
+            .flatMap(({meta}) => {
+                const codex = meta["codex"];
+                return codex !== null && typeof codex === "object" ? Object.keys(codex) : [];
+            });
+        expect([...new Set(codexKeys)]).toEqual(["modelKnownInCatalog"]);
         expect(text).not.toContain("diffStats");
         expect(text).not.toContain("\"terminal_output\"");
     });

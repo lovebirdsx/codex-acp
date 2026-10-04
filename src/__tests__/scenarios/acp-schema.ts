@@ -33,6 +33,28 @@ const MESSAGE_TYPES: Record<string, string> = {
  * The schema of `_auth/status_update` follows `AuthStatusUpdateNotification` in `src/AuthStatusMeta.ts`.
  */
 const EXTENSION_NOTIFICATION_SCHEMAS: Record<string, object> = {
+    // fork: forwards the MCP startup outcome for the editor's MCP panel, see
+    // `MCP_SERVER_STATUS_METHOD` in `src/ACPSessionConnection.ts`.
+    "_universe/mcp_server_status": {
+        type: "object",
+        required: ["sessionId", "servers"],
+        additionalProperties: false,
+        properties: {
+            sessionId: {type: "string"},
+            servers: {
+                type: "array",
+                items: {
+                    type: "object",
+                    required: ["name", "status"],
+                    additionalProperties: false,
+                    properties: {
+                        name: {type: "string"},
+                        status: {enum: ["connected", "failed", "cancelled"]},
+                    },
+                },
+            },
+        },
+    },
     "_auth/status_update": {
         type: "object",
         required: ["authStatus"],
