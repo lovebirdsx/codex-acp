@@ -2,6 +2,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { ServerNotification } from "../../app-server";
 import type { TokenUsageBreakdown } from "../../app-server/v2";
 import { createCodexMockTestFixture, createTestSessionState, type CodexMockTestFixture } from "../acp-test-utils";
+import { ClientCapabilities } from "../../tool-calls/ClientCapabilities";
 import type { SessionState } from "../../CodexAcpServer";
 import type { QuotaMeta } from "../../QuotaMeta";
 import type { UpdateSessionEvent } from "../../ACPSessionConnection";
@@ -48,7 +49,11 @@ function subAgentActivityStarted(agentThreadId: string, itemId: string): ServerN
     };
 }
 
-function collabAgentToolCallStarted(receiverThreadIds: string[], itemId: string): ServerNotification {
+function collabAgentToolCallStarted(
+    receiverThreadIds: string[],
+    itemId: string,
+    model: string | null = null,
+): ServerNotification {
     return {
         method: "item/started",
         params: {
@@ -63,7 +68,7 @@ function collabAgentToolCallStarted(receiverThreadIds: string[], itemId: string)
                 senderThreadId: sessionId,
                 receiverThreadIds,
                 prompt: "go",
-                model: null,
+                model,
                 reasoningEffort: null,
                 agentsStates: {},
             },
@@ -305,6 +310,62 @@ describe("CodexEventHandler - sub-agent token usage", () => {
                 reasoningOutputTokens: 150,
             },
         }]);
+    });
+
+    /*
+     * fork: the model a sub-agent runs on, so the client can price its tokens. The model comes
+     * from the spawn item; a spawn that inherited the session model names none and the session
+     * model stands in. Only a client that reads the trail receives the field at all.
+     */
+    it("reports the model of a sub-agent with its stats, for a client that reads the trail", async () => {
+        sessionState = createTestSessionState({
+            sessionId,
+            clientCapabilities: ClientCapabilities.from({
+                _meta: {terminal_output_delta: true, "subagent-transcript": true},
+            }),
+        });
+        await setupPrompt(mockFixture, sessionState);
+        await sendAndDrain(
+            mockFixture,
+            mainTokenUsageNotification(),
+            collabAgentToolCallStarted(["thread-collab-1"], "collab-1"),
+            subAgentTokenUsage("thread-collab-1", breakdown(500, 400, 100, 200, 0)),
+        );
+
+        const statsUpdate = updates(mockFixture)
+            .find((u) => u.sessionUpdate === "tool_call_update") as Extract<UpdateSessionEvent, { sessionUpdate: "tool_call_update" }>;
+        // The spawn named no model, so the session model stands in — stripped of its effort hint.
+        expect(statsUpdate._meta).toEqual({
+            "_universe/subagentStats": {
+                model: "model-id",
+                inputTokens: 300,
+                outputTokens: 200,
+                cacheReadTokens: 100,
+                cacheCreateTokens: 0,
+            },
+        });
+    });
+
+    it("prefers the model the spawn requested, stripped of its effort hint", async () => {
+        sessionState = createTestSessionState({
+            sessionId,
+            clientCapabilities: ClientCapabilities.from({
+                _meta: {terminal_output_delta: true, "subagent-transcript": true},
+            }),
+        });
+        await setupPrompt(mockFixture, sessionState);
+        await sendAndDrain(
+            mockFixture,
+            mainTokenUsageNotification(),
+            collabAgentToolCallStarted(["thread-collab-1"], "collab-1", "gpt-5-codex[high]"),
+            subAgentTokenUsage("thread-collab-1", breakdown(500, 400, 100, 200, 0)),
+        );
+
+        const statsUpdate = updates(mockFixture)
+            .find((u) => u.sessionUpdate === "tool_call_update") as Extract<UpdateSessionEvent, { sessionUpdate: "tool_call_update" }>;
+        expect(statsUpdate._meta).toMatchObject({
+            "_universe/subagentStats": {model: "gpt-5-codex"},
+        });
     });
 
     it("ignores broadcast notifications without a threadId", async () => {

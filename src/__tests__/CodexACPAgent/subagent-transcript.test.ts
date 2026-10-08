@@ -135,6 +135,56 @@ function activity(kind: "started" | "completed", itemId: string, threadId = chil
     } as ServerNotification;
 }
 
+/**
+ * The collaboration spawn of a sub-agent thread, on the root thread. Codex names the threads a
+ * spawn created in the completed item only, so the started item carries none.
+ */
+function spawnStarted(itemId: string, atMs: number): ServerNotification {
+    return {
+        method: "item/started",
+        params: {
+            threadId: sessionId,
+            turnId: "turn-1",
+            startedAtMs: atMs,
+            item: {
+                type: "collabAgentToolCall",
+                id: itemId,
+                tool: "spawnAgent",
+                status: "inProgress",
+                senderThreadId: sessionId,
+                receiverThreadIds: [],
+                prompt: "Check the weather in Paris",
+                model: "gpt-5-codex",
+                reasoningEffort: null,
+                agentsStates: {},
+            },
+        },
+    } as ServerNotification;
+}
+
+function spawnCompleted(itemId: string, threadId: string, atMs: number): ServerNotification {
+    return {
+        method: "item/completed",
+        params: {
+            threadId: sessionId,
+            turnId: "turn-1",
+            completedAtMs: atMs,
+            item: {
+                type: "collabAgentToolCall",
+                id: itemId,
+                tool: "spawnAgent",
+                status: "completed",
+                senderThreadId: sessionId,
+                receiverThreadIds: [threadId],
+                prompt: "Check the weather in Paris",
+                model: "gpt-5-codex",
+                reasoningEffort: null,
+                agentsStates: {},
+            },
+        },
+    } as ServerNotification;
+}
+
 describe("CodexEventHandler - sub-agent transcript", () => {
     it("holds the work of a child until the card of its sub-agent arrives, then sends it after the card", async () => {
         const {handler, updates} = createHandler();
@@ -159,18 +209,28 @@ describe("CodexEventHandler - sub-agent transcript", () => {
         expect(JSON.stringify(child)).toContain("Sunny");
     });
 
-    it("keeps the lifecycle and the root thread out of the trail", async () => {
+    it("keeps the lifecycle and the root thread out of the trail, but forwards the end of a run", async () => {
         const {handler, updates} = createHandler();
 
-        // A turn of a child describes the child conversation, not the work of the sub-agent.
+        // A turn of a child describes the child conversation, not the work of the sub-agent — its
+        // end is the one exception: it freezes the duration the card shows.
         await handler.handleChildTranscript(childTurnCompleted());
         // Work of the root thread never belongs to a card.
         await handler.handleChildTranscript(commandStarted("root-cmd", sessionId));
 
         await handler.handleNotification(activity("started", "act-1"));
 
-        // Nothing was buffered: the card is the only update, and no flush follows it.
-        expect(updates()).toHaveLength(1);
+        const [card, runEnd, ...rest] = updates();
+        expect(card).toMatchObject({sessionUpdate: "tool_call", toolCallId: "act-1"});
+        expect(rest).toEqual([]);
+        // The buffered run end arrived after the card that was waiting for it, as a bare timing
+        // update: the anchor is the moment the activity named the thread.
+        expect(runEnd).toMatchObject({
+            sessionUpdate: "tool_call_update",
+            toolCallId: "act-1",
+            _meta: {"_universe/subagentTiming": {startedAtMs: 0}},
+        });
+        expect(JSON.stringify(updates())).not.toContain("root-cmd");
     });
 
     it("keeps the work and the token stats on the Start card of the sub-agent", async () => {
@@ -215,5 +275,32 @@ describe("CodexEventHandler - sub-agent transcript", () => {
         const [card, late] = updates().slice(1);
         expect(card).toMatchObject({toolCallId: "act-17"});
         expect(parentOf(late)).toBe("act-17");
+    });
+
+    it("anchors the run of a spawned sub-agent and freezes it when the child turn ends", async () => {
+        vi.useFakeTimers();
+        try {
+            const {handler, updates} = createHandler();
+            vi.setSystemTime(20_000);
+
+            await handler.handleNotification(spawnStarted("spawn-1", 1_000));
+            const card = updates()[0];
+            expect(card).toMatchObject({sessionUpdate: "tool_call", toolCallId: "spawn-1"});
+            // The card anchors the run: the spawning item itself is over in milliseconds, so the
+            // client shows a running clock from here instead of the item's own lifetime.
+            expect(card?._meta).toMatchObject({"_universe/subagentTiming": {startedAtMs: 1_000}});
+
+            // The completed item is where Codex names the thread, so that is where the run starts.
+            await handler.handleNotification(spawnCompleted("spawn-1", childThreadId, 5_000));
+            await handler.handleChildTranscript(childTurnCompleted());
+
+            expect(updates().at(-1)).toMatchObject({
+                sessionUpdate: "tool_call_update",
+                toolCallId: "spawn-1",
+                _meta: {"_universe/subagentTiming": {startedAtMs: 5_000, durationMs: 15_000}},
+            });
+        } finally {
+            vi.useRealTimers();
+        }
     });
 });

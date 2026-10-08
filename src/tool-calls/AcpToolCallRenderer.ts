@@ -114,6 +114,7 @@ export class AcpToolCallRenderer {
             ...(facts.standard?.mcpProgress === undefined ? {} : {mcp_output_delta: {data: facts.standard.mcpProgress}}),
             ...mcpMeta(facts),
             ...this.subagentMeta(facts),
+            ...this.subagentTimingMeta(facts),
         };
     }
 
@@ -133,6 +134,22 @@ export class AcpToolCallRenderer {
                     ...(path === undefined ? {} : {path}),
                     activity,
                 },
+            },
+        };
+    }
+
+    /**
+     * Fork addition: how long the sub-agent of this card ran, for the same client as `subagentMeta`.
+     * The key sits next to `_universe/subagentStats` (which the session handler stamps on its own),
+     * so one namespace carries everything the editor shows on a sub-agent card's header.
+     */
+    private subagentTimingMeta(facts: ToolFacts): Record<string, unknown> {
+        const timing = facts.subagentTiming;
+        if (!this.capabilities.subagentTranscript || timing === undefined) return {};
+        return {
+            "_universe/subagentTiming": {
+                ...(timing.startedAtMs === undefined ? {} : {startedAtMs: timing.startedAtMs}),
+                ...(timing.durationMs === undefined ? {} : {durationMs: timing.durationMs}),
             },
         };
     }

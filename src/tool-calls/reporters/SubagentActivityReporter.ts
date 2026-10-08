@@ -9,6 +9,7 @@ export class SubagentActivityReporter {
         item: SubAgentActivityItem,
         status: "in_progress" | "completed",
         report: ToolFacts["report"],
+        timing?: ToolFacts["subagentTiming"],
     ): ToolFacts {
         const name = item.agentPath.split("/").filter(Boolean).at(-1) ?? "subagent";
         return {
@@ -23,6 +24,7 @@ export class SubagentActivityReporter {
             },
             subagent: true,
             subagentInfo: {threadId: item.agentThreadId, path: item.agentPath, activity: item.kind},
+            ...(timing === undefined ? {} : {subagentTiming: timing}),
         };
     }
 }

@@ -438,6 +438,7 @@ export function createTestSessionState(overrides?: Partial<SessionState>): Sessi
         compactions: new CodexSessionCompactions(),
         toolCallReports: new ToolCallReports(),
         subagentParentItemByThreadId: new Map(),
+        subagentRunByThreadId: new Map(),
         subagents: new CodexSubagentEventRouter(
             sessionId,
             false,

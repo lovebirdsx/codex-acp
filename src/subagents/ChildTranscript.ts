@@ -59,6 +59,17 @@ export function isChildTranscriptNotification(notification: ServerNotification):
 }
 
 /**
+ * Fork addition: the end of one run of a sub-agent. The child turn lifecycle stays out of the
+ * trail (see `isChildTranscriptNotification`) because it describes the child conversation rather
+ * than what the sub-agent did — but the end of a run is what freezes the duration the client
+ * shows on the card, so it is forwarded on purpose. A sub-agent that Codex resumes reports
+ * another end.
+ */
+export function isChildRunEndNotification(notification: ServerNotification): boolean {
+    return notification.method === "turn/completed";
+}
+
+/**
  * Attributes an update of a child thread to the card of the sub-agent activity that spawned it.
  * The client nests the update under that card, the way the claude fork attributes a sub-agent
  * update with `_meta.claudeCode.parentToolUseId`.

@@ -228,22 +228,34 @@ export class CodexSubagentEventRouter {
         });
     }
 
-    legacyActivityStarted(item: ThreadItem & {type: "subAgentActivity"}): ToolFacts {
+    legacyActivityStarted(
+        item: ThreadItem & {type: "subAgentActivity"},
+        timing?: ToolFacts["subagentTiming"],
+    ): ToolFacts {
         this.activeLegacyActivities.add(item.id);
-        return SubagentActivityReporter.activity(item, "in_progress", "start");
+        return SubagentActivityReporter.activity(item, "in_progress", "start", timing);
     }
 
-    legacyCollaborationStarted(item: ThreadItem & {type: "collabAgentToolCall"}): ToolFacts {
-        return CollabAgentReporter.started(item);
+    legacyCollaborationStarted(
+        item: ThreadItem & {type: "collabAgentToolCall"},
+        timing?: ToolFacts["subagentTiming"],
+    ): ToolFacts {
+        return CollabAgentReporter.started(item, timing);
     }
 
-    legacyCollaborationCompleted(item: ThreadItem & {type: "collabAgentToolCall"}): ToolFacts {
-        return CollabAgentReporter.completed(item);
+    legacyCollaborationCompleted(
+        item: ThreadItem & {type: "collabAgentToolCall"},
+        timing?: ToolFacts["subagentTiming"],
+    ): ToolFacts {
+        return CollabAgentReporter.completed(item, timing);
     }
 
-    legacyActivityCompleted(item: ThreadItem & {type: "subAgentActivity"}): ToolFacts {
+    legacyActivityCompleted(
+        item: ThreadItem & {type: "subAgentActivity"},
+        timing?: ToolFacts["subagentTiming"],
+    ): ToolFacts {
         const report = this.activeLegacyActivities.delete(item.id) ? "update" : "start";
-        return SubagentActivityReporter.activity(item, "completed", report);
+        return SubagentActivityReporter.activity(item, "completed", report, timing);
     }
 
     /** The caller finalizes pending child updates before closing timed-out sessions. */

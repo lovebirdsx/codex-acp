@@ -57,6 +57,7 @@ import type {
     ThreadResumeParams,
     ThreadSourceKind,
     ThreadItem,
+    Turn,
     TurnCompletedNotification,
     TurnSteerResponse,
     UserInput,
@@ -731,11 +732,24 @@ export class CodexAcpClient {
      * Returns null when the session has fewer turns.
      */
     async readSessionTurnItems(sessionId: string, index: number): Promise<AsyncIterable<ThreadItem[]> | null> {
+        return (await this.readSessionTurn(sessionId, index))?.items ?? null;
+    }
+
+    /**
+     * Fork addition: the turn at `index` of a session together with the span Codex recorded for
+     * it, so a replayed sub-agent card can carry how long the sub-agent ran. The items are the
+     * same pages `readSessionTurnItems` returns; the turn metadata comes from the read that
+     * already fetched it.
+     */
+    async readSessionTurn(
+        sessionId: string,
+        index: number,
+    ): Promise<{items: AsyncIterable<ThreadItem[]>; turn: Turn} | null> {
         const metadata = await this.codexClient.threadRead({threadId: sessionId});
         if (metadata.thread.historyMode === "legacy") {
             const legacy = await this.codexClient.threadRead({threadId: sessionId, includeTurns: true});
             const turn = legacy.thread.turns[index];
-            return turn ? oneItemPage(turn.items) : null;
+            return turn ? {items: oneItemPage(turn.items), turn} : null;
         }
         let first = 0;
         const pages = this.codexClient.threadTurnPages({
@@ -746,7 +760,7 @@ export class CodexAcpClient {
         });
         for await (const page of pages) {
             const turn = page[index - first];
-            if (turn) return this.codexClient.threadItemPages(sessionId, {turnId: turn.id});
+            if (turn) return {items: this.codexClient.threadItemPages(sessionId, {turnId: turn.id}), turn};
             first += page.length;
         }
         return null;

@@ -62,7 +62,7 @@ import {
     JETBRAINS_META_KEY,
 } from "./AirExtension";
 import {CodexSubagentEventRouter} from "./subagents/CodexSubagentEventRouter";
-import {isChildTranscriptNotification, stampChildParentToolCallId} from "./subagents/ChildTranscript";
+import {isChildRunEndNotification, isChildTranscriptNotification, stampChildParentToolCallId} from "./subagents/ChildTranscript";
 import {PendingNotificationBuffer} from "./subagents/PendingNotificationBuffer";
 import type {SubagentState} from "./subagents/AcpSubagents";
 import {mergeRateLimitSnapshot} from "./RateLimitsMap";
@@ -927,8 +927,10 @@ export class CodexEventHandler {
                 this.activeImageGenerationItems.add(event.item.id);
                 return this.renderer.render(ImageGenerationReporter.started(event.item));
             case "collabAgentToolCall":
-                this.recordCollaborationChildren(event.item);
-                return this.renderer.render(this.subagents.legacyCollaborationStarted(event.item));
+                this.recordCollaborationChildren(event.item, event.startedAtMs);
+                return this.renderer.render(this.subagents.legacyCollaborationStarted(event.item, {
+                    startedAtMs: event.startedAtMs,
+                }));
             case "agentMessage":
                 this.rememberAgentMessagePhase(event.item);
                 return null;
@@ -940,8 +942,10 @@ export class CodexEventHandler {
                     )
                     : this.renderer.render(CompactionReporter.started(event.item));
             case "subAgentActivity":
-                this.recordSubagentThread(event.item.agentThreadId, event.item.kind, event.item.id);
-                return this.renderer.render(this.subagents.legacyActivityStarted(event.item));
+                this.recordSubagentThread(event.item.agentThreadId, event.item.kind, event.item.id, event.startedAtMs);
+                return this.renderer.render(this.subagents.legacyActivityStarted(event.item, {
+                    startedAtMs: event.startedAtMs,
+                }));
             case "sleep":
             case "functionCallOutput":
             case "userMessage":
@@ -981,7 +985,7 @@ export class CodexEventHandler {
             case "webSearch":
                 return this.renderer.render(WebSearchReporter.completed(event.item));
             case "collabAgentToolCall":
-                this.recordCollaborationChildren(event.item);
+                this.recordCollaborationChildren(event.item, event.completedAtMs);
                 return this.renderer.render(this.subagents.legacyCollaborationCompleted(event.item));
             case "agentMessage":
                 this.rememberAgentMessagePhase(event.item);
@@ -998,7 +1002,7 @@ export class CodexEventHandler {
                     )
                     : this.renderer.render(CompactionReporter.completed(event.item));
             case "subAgentActivity":
-                this.recordSubagentThread(event.item.agentThreadId, event.item.kind, event.item.id);
+                this.recordSubagentThread(event.item.agentThreadId, event.item.kind, event.item.id, event.completedAtMs);
                 return this.renderer.render(this.subagents.legacyActivityCompleted(event.item));
             //ignored types
             case "sleep":
@@ -1390,11 +1394,13 @@ export class CodexEventHandler {
         if (itemId == null) {
             return null;
         }
+        const model = this.subagentStatsModel(threadId);
         return {
             sessionUpdate: "tool_call_update",
             toolCallId: itemId,
             _meta: {
                 "_universe/subagentStats": {
+                    ...(model === "" ? {} : {model}),
                     inputTokens: tokenCount.inputTokens,
                     outputTokens: tokenCount.outputTokens,
                     cacheReadTokens: tokenCount.cachedInputTokens,
@@ -1405,6 +1411,22 @@ export class CodexEventHandler {
     }
 
     /*
+     * Fork addition: the model a sub-agent thread runs on, so the client can price its tokens
+     * (the claude fork reports the same field). Codex names the model it requested in the spawn
+     * item; a spawn that inherited the session model names none, and the session model stands in
+     * for it — that is the value the sub-agent runs under unless the spawn asked otherwise. The
+     * trailing `[effort]` hint is stripped the way the quota meta strips it, because the client's
+     * rate table is keyed by the bare model id. Empty means "unknown": the field is omitted
+     * rather than guessed, and only a client that reads the trail receives it at all.
+     */
+    private subagentStatsModel(threadId: string): string {
+        if (!this.sessionState.clientCapabilities.subagentTranscript) return "";
+        const model = this.sessionState.subagentRunByThreadId.get(threadId)?.model
+            ?? this.sessionState.currentModelId;
+        return model.replace(/\[.*?]$/, "");
+    }
+
+    /*
      * Fork addition: the work of a sub-agent thread, forwarded on the root session for a client
      * that reads the sub-agent trail without native subagent sessions. Every update is attributed
      * to the card of the sub-agent activity (`_meta.codex.parentToolCallId`), so the client nests
@@ -1412,7 +1434,7 @@ export class CodexEventHandler {
      * its card settles when the app-server reports the end, exactly as the root thread does.
      */
     async handleChildTranscript(notification: ServerNotification): Promise<void> {
-        if (!isChildTranscriptNotification(notification)) return;
+        if (!isChildTranscriptNotification(notification) && !isChildRunEndNotification(notification)) return;
         const threadId = (notification.params as {threadId?: unknown}).threadId;
         if (typeof threadId !== "string" || threadId === this.sessionState.sessionId) return;
         if (!this.sessionState.subagentParentItemByThreadId.has(threadId)) {
@@ -1441,6 +1463,11 @@ export class CodexEventHandler {
     private async forwardChildTranscript(threadId: string, notification: ServerNotification): Promise<void> {
         const parentToolCallId = this.sessionState.subagentParentItemByThreadId.get(threadId);
         if (parentToolCallId === undefined) return;
+        // The end of a run is not part of the trail: it only freezes the duration on the card.
+        if (isChildRunEndNotification(notification)) {
+            await this.reportSubagentRunEnd(threadId, parentToolCallId);
+            return;
+        }
         if (notification.method === "item/started") {
             // The observation of the tool call id of a sub-agent: the client merges two cards
             // with the same id, so a collision with the root thread would show up here.
@@ -1450,6 +1477,33 @@ export class CodexEventHandler {
         const update = await this.createUpdateEvent(notification);
         if (update === null) return;
         await this.session.update(stampChildParentToolCallId(update, parentToolCallId));
+    }
+
+    /*
+     * Fork addition: how long a sub-agent ran, on the card that owns its thread. The anchor is the
+     * moment Codex named the thread (see `recordSubagentThread`), and the end of the child's turn
+     * is where the run stops. Both live clocks are on the app-server host, so the client can show
+     * a running clock from the anchor on. A resumed sub-agent reports another end, which
+     * overwrites the duration with the longer value.
+     *
+     * A spawn that created several threads shares one card and one anchor, and each of them
+     * reports its own end: the first one freezes the card at its own (smaller) span until the last
+     * one overwrites it with the full one. That self-heals, unlike gating on the last thread,
+     * which would leave the card ticking forever if one of them never reports an end.
+     */
+    private async reportSubagentRunEnd(threadId: string, parentToolCallId: string): Promise<void> {
+        const run = this.sessionState.subagentRunByThreadId.get(threadId);
+        if (run === undefined) return;
+        await this.session.update({
+            sessionUpdate: "tool_call_update",
+            toolCallId: parentToolCallId,
+            _meta: {
+                "_universe/subagentTiming": {
+                    startedAtMs: run.startedAtMs,
+                    durationMs: Math.max(0, Date.now() - run.startedAtMs),
+                },
+            },
+        });
     }
 
     /** Sends the buffered child updates whose sub-agent card is known now, in arrival order. */
@@ -1469,13 +1523,32 @@ export class CodexEventHandler {
      * thread (Codex resumed the sub-agent), and the first activity that names the thread
      * wins otherwise, so the token stats and the child trail stay on one card. A client that
      * does not read the trail keeps the rule it had: the newest activity names the card.
+     *
+     * The run recorded alongside the card follows the same rule: a resumed sub-agent starts a
+     * fresh run, while a report that does not take the card must not rewind the anchor — that
+     * would zero the duration the run end reports. `atMs` is the moment Codex named the thread,
+     * which is when the sub-agent starts to work: the spawning item itself completes in
+     * milliseconds, see `recordCollaborationChildren`.
      */
-    private recordSubagentThread(threadId: string, kind: string, itemId: string): void {
+    private recordSubagentThread(
+        threadId: string,
+        kind: string,
+        itemId: string,
+        atMs: number,
+        model: string | null = null,
+    ): void {
         const parents = this.subagentParents();
-        if (kind === "started"
+        const takesCard = kind === "started"
             || !parents.has(threadId)
-            || !this.sessionState.clientCapabilities.subagentTranscript) {
-            parents.set(threadId, itemId);
+            || !this.sessionState.clientCapabilities.subagentTranscript;
+        if (takesCard) parents.set(threadId, itemId);
+        if (takesCard && this.sessionState.clientCapabilities.subagentTranscript) {
+            const previous = this.sessionState.subagentRunByThreadId.get(threadId);
+            // An activity report never names a model: keep the one the spawn reported.
+            this.sessionState.subagentRunByThreadId.set(threadId, {
+                model: model ?? previous?.model ?? null,
+                startedAtMs: atMs,
+            });
         }
     }
 
@@ -1501,12 +1574,18 @@ export class CodexEventHandler {
      * other client keeps the representation it had. A `started` activity of the same thread still
      * wins (`recordSubagentThread`), because it is the card the app-server reports the trail on.
      */
-    private recordCollaborationChildren(item: ThreadItem & {type: "collabAgentToolCall"}): void {
+    private recordCollaborationChildren(
+        item: ThreadItem & {type: "collabAgentToolCall"},
+        atMs: number,
+    ): void {
         if (!this.sessionState.clientCapabilities.subagentTranscript || item.tool !== "spawnAgent") {
             return;
         }
+        // The app-server names the threads of a spawn in the completed item only, so this is the
+        // moment the sub-agents start to work (~200ms before their first turn opens).
+        const model = typeof item.model === "string" && item.model.trim() !== "" ? item.model : null;
         for (const threadId of item.receiverThreadIds) {
-            if (threadId.trim() !== "") this.recordSubagentThread(threadId, "spawned", item.id);
+            if (threadId.trim() !== "") this.recordSubagentThread(threadId, "spawned", item.id, atMs, model);
         }
     }
 

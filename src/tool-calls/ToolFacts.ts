@@ -50,6 +50,13 @@ export type ToolFacts = {
      * A field is absent while the report does not know it yet.
      */
     subagentInfo?: {threadId?: string; path?: string; activity: string};
+    /**
+     * Fork addition: how long the sub-agent of this tool call runs. The spawning item completes in
+     * milliseconds while the sub-agent runs for minutes, so the start report anchors the run and the
+     * end of the sub-agent's turn reports the duration. A client that declares `subagent-transcript`
+     * reads it as `_meta._universe/subagentTiming`, see `AcpToolCallRenderer.subagentTimingMeta`.
+     */
+    subagentTiming?: {startedAtMs?: number; durationMs?: number};
     contextCompaction?: ContextCompactionMetadata;
     /** The fields of a client that is not AIR, where they differ from the fields above. */
     standard?: StandardToolCallFields;

@@ -16,20 +16,24 @@ type CollabAgentToolCallItem = ThreadItem & {type: "collabAgentToolCall"};
  * completed item.
  */
 export class CollabAgentReporter {
-    static started(item: CollabAgentToolCallItem): ToolFacts {
+    static started(item: CollabAgentToolCallItem, timing?: ToolFacts["subagentTiming"]): ToolFacts {
         return {
-            ...facts(item, "start"),
+            ...facts(item, "start", timing),
             kind: "other",
             ...(item.prompt ? {readableInput: item.prompt} : {}),
         };
     }
 
-    static completed(item: CollabAgentToolCallItem): ToolFacts {
-        return facts(item, "update");
+    static completed(item: CollabAgentToolCallItem, timing?: ToolFacts["subagentTiming"]): ToolFacts {
+        return facts(item, "update", timing);
     }
 }
 
-function facts(item: CollabAgentToolCallItem, report: ToolFacts["report"]): ToolFacts {
+function facts(
+    item: CollabAgentToolCallItem,
+    report: ToolFacts["report"],
+    timing?: ToolFacts["subagentTiming"],
+): ToolFacts {
     const input = {
         prompt: item.prompt,
         senderThreadId: item.senderThreadId,
@@ -44,6 +48,7 @@ function facts(item: CollabAgentToolCallItem, report: ToolFacts["report"]): Tool
         title: item.tool,
         status: toToolStatus(item.status),
         input,
+        ...(timing === undefined ? {} : {subagentTiming: timing}),
         ...(item.tool === "spawnAgent" ? {subagent: true, subagentInfo: spawnInfo(item)} : {}),
         standard: {
             content: null,

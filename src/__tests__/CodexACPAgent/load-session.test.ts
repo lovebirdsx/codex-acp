@@ -731,6 +731,73 @@ describe("CodexACPAgent - loadSession", () => {
         expect(updates[secondTurnIndex]?.update._meta?.codex?.parentToolCallId).toBe("spawn-1");
     });
 
+    it("carries how long a replayed sub-agent ran, from the spans of its turns", async () => {
+        const fixture = createCodexMockTestFixture();
+        const agent = fixture.getCodexAcpAgent();
+        const client = fixture.getCodexAcpClient();
+        const appServer = fixture.getCodexAppServerClient();
+        client.readAuthRequirement = vi.fn().mockResolvedValue({required: false, account: null});
+        client.getAccount = vi.fn().mockResolvedValue({account: null, requiresOpenaiAuth: false});
+        client.listSkills = vi.fn().mockResolvedValue({data: []});
+        const model = createTestModel();
+        appServer.listModels = vi.fn().mockResolvedValue({data: [model], nextCursor: null});
+
+        const message = (id: string, text: string) => ({
+            type: "agentMessage", id, text, phase: null, memoryCitation: null, delivery: null, questions: null,
+        });
+        const childTurn = (index: number, durationMs: number, span?: {startedAt: number; completedAt: number}) => ({
+            id: `child-turn-${index}`,
+            itemsView: "full",
+            status: "completed",
+            items: [message(`child-message-${index}`, `turn ${index}`)],
+            startedAt: span?.startedAt ?? null,
+            completedAt: span?.completedAt ?? null,
+            durationMs,
+        });
+        const child = {
+            id: "child-history",
+            historyMode: "legacy",
+            // The third turn recorded no millisecond span; its unix-second timestamps are the
+            // fallback (a `durationMs: 0` is missing data, not a turn that took no time).
+            turns: [childTurn(1, 1_200), childTurn(2, 3_400), childTurn(3, 0, {startedAt: 10, completedAt: 12})],
+        } as unknown as Thread;
+        const root = {
+            id: "root-history",
+            historyMode: "legacy",
+            turns: [{
+                id: "root-turn-1", itemsView: "full", status: "completed", items: [
+                    {
+                        type: "collabAgentToolCall", id: "spawn-1", tool: "spawnAgent", status: "completed",
+                        senderThreadId: "root-history", receiverThreadIds: ["child-history"],
+                        prompt: "Run echo alpha.", model: null, reasoningEffort: null,
+                        agentsStates: {"child-history": {status: "completed", message: "beta"}},
+                    },
+                ],
+            }],
+        } as unknown as Thread;
+        appServer.threadResume = vi.fn().mockResolvedValue({
+            thread: root, model: model.id, modelProvider: "openai", cwd: "/workspace",
+            approvalPolicy: "never", sandbox: {type: "dangerFullAccess"},
+            reasoningEffort: model.defaultReasoningEffort,
+        });
+        appServer.threadReadWithHistory = vi.fn().mockResolvedValue({thread: root});
+        appServer.threadRead = vi.fn().mockImplementation(({threadId}) =>
+            Promise.resolve({thread: threadId === "child-history" ? child : root}));
+
+        await agent.initialize({protocolVersion: 1, clientCapabilities: {_meta: {"subagent-transcript": true}}});
+        await agent.loadSession({sessionId: root.id, cwd: "/workspace", mcpServers: []});
+
+        const updates = fixture.getAcpConnectionEvents([])
+            .filter(event => event.method === "sessionUpdate")
+            .map(event => event.args[0].update);
+        const timing = updates.filter(update => update._meta?.["_universe/subagentTiming"] !== undefined);
+        // The thread ran three turns, so its card carries their sum — the live session reports the
+        // same value when the child's turn ends (1_200 + 3_400 + 2_000 from the third turn's span).
+        expect(timing).toHaveLength(1);
+        expect(timing[0]?.toolCallId).toBe("spawn-1");
+        expect(timing[0]?._meta?.["_universe/subagentTiming"]).toEqual({durationMs: 6_600});
+    });
+
     it("should replay history during loadSession", async () => {
         const fixture = createCodexMockTestFixture();
         const codexAcpAgent = fixture.getCodexAcpAgent();

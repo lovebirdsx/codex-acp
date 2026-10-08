@@ -37,6 +37,7 @@ import type {
     ThreadGoal,
     ThreadItem,
     ThreadTokenUsageUpdatedNotification,
+    Turn,
     UserInput
 } from "./app-server/v2";
 import type {RateLimitsMap} from "./RateLimitsMap";
@@ -197,6 +198,16 @@ import {
 } from "./AgentFileChangeReport";
 
 
+/*
+ * Fork addition: what the editor needs to show on a sub-agent card's header. The anchor is the
+ * moment Codex named the thread, because the spawning item itself completes in milliseconds while
+ * the sub-agent runs for minutes. `model` is null when the spawn inherited the session model.
+ */
+export interface SubagentRun {
+    model: string | null;
+    startedAtMs: number;
+}
+
 export interface SessionState {
     sessionId: string,
     currentModelId: string,
@@ -215,6 +226,13 @@ export interface SessionState {
      * across prompts. `CodexEventHandler.recordSubagentThread` writes it.
      */
     subagentParentItemByThreadId: Map<string, string>;
+    /*
+     * Fork addition: the run of each sub-agent thread, keyed by app-server thread id. Lives in the
+     * session for the same reason as `subagentParentItemByThreadId`: it must survive the prompt
+     * handler that started the sub-agent. `CodexEventHandler` writes it; the model is reported
+     * with the token stats and the anchor is reported as `_universe/subagentTiming`.
+     */
+    subagentRunByThreadId: Map<string, SubagentRun>;
     modelContextWindow: number | null;
     modelKnownInCatalog: boolean;
     rateLimits: RateLimitsMap | null;
@@ -857,6 +875,7 @@ export class CodexAcpServer {
             totalTokenUsage: null,
             subagentTokenUsage: new Map(),
             subagentParentItemByThreadId: new Map(),
+            subagentRunByThreadId: new Map(),
             modelContextWindow: null,
             modelKnownInCatalog: this.isModelInCatalogue(catalogueModels, currentModelId),
             rateLimits: null,
@@ -2503,6 +2522,7 @@ export class CodexAcpServer {
             totalTokenUsage: null,
             subagentTokenUsage: new Map(),
             subagentParentItemByThreadId: new Map(),
+            subagentRunByThreadId: new Map(),
             modelContextWindow: null,
             modelKnownInCatalog: this.isModelInCatalogue(catalogueModels, currentModelId),
             rateLimits: null,
@@ -2607,6 +2627,10 @@ export class CodexAcpServer {
         } else {
             const generations = new Map<string, number>();
             const replayedChildren = new Set<string>();
+            // Fork addition: how long each replayed sub-agent ran, accumulated across the turn
+            // ranges the two walkers cover, so a thread whose turns are split between them still
+            // ends with its full duration on the card.
+            const replayedRunMs = new Map<string, number>();
             for await (const items of itemPages) {
                 for (const item of items) {
                     if (!isOpen()) throw new SessionClosedDuringLoadError();
@@ -2642,6 +2666,7 @@ export class CodexAcpServer {
                             sessionState,
                             budget,
                             isOpen,
+                            replayedRunMs,
                         )) {
                             return;
                         }
@@ -2670,6 +2695,7 @@ export class CodexAcpServer {
                                 sessionState,
                                 budget,
                                 isOpen,
+                                replayedRunMs,
                             )) {
                                 return;
                             }
@@ -2941,18 +2967,32 @@ export class CodexAcpServer {
         sessionState: SessionState,
         budget: ReplayBudgetState,
         isOpen: () => boolean,
+        replayedRunMs: Map<string, number>,
     ): Promise<boolean> {
-        const childItems = await this.readChildTurnItems(childThreadId, generation - 1);
-        if (childItems === null) return true;
-        return await this.streamChildTurn(
+        const child = await this.readChildTurn(childThreadId, generation - 1);
+        if (child === null) return true;
+        if (!await this.streamChildTurn(
             session,
             sessionId,
             parentToolCallId,
             childThreadId,
-            childItems,
+            child.items,
             sessionState,
             budget,
             isOpen,
+        )) {
+            return false;
+        }
+        const durationMs = turnDurationMs(child.turn);
+        if (durationMs === null) return true;
+        return await this.publishSubagentRunDuration(
+            session,
+            sessionId,
+            parentToolCallId,
+            childThreadId,
+            durationMs,
+            budget,
+            replayedRunMs,
         );
     }
 
@@ -2974,31 +3014,76 @@ export class CodexAcpServer {
         sessionState: SessionState,
         budget: ReplayBudgetState,
         isOpen: () => boolean,
+        replayedRunMs: Map<string, number>,
     ): Promise<boolean> {
+        let runMs = 0;
+        let runKnown = false;
         for (let index = firstTurn; ; index++) {
-            const childItems = await this.readChildTurnItems(childThreadId, index);
-            if (childItems === null) return true;
+            const child = await this.readChildTurn(childThreadId, index);
+            if (child === null) break;
             if (!await this.streamChildTurn(
                 session,
                 sessionId,
                 parentToolCallId,
                 childThreadId,
-                childItems,
+                child.items,
                 sessionState,
                 budget,
                 isOpen,
             )) {
                 return false;
             }
+            const durationMs = turnDurationMs(child.turn);
+            if (durationMs !== null) {
+                runKnown = true;
+                runMs += durationMs;
+            }
         }
+        if (!runKnown) return true;
+        return await this.publishSubagentRunDuration(
+            session,
+            sessionId,
+            parentToolCallId,
+            childThreadId,
+            runMs,
+            budget,
+            replayedRunMs,
+        );
     }
 
-    private async readChildTurnItems(
+    /*
+     * Fork addition: how long a replayed sub-agent ran, on the card that owns its thread, the way
+     * the live session reports it when the child's turn ends. The walkers cover different turn
+     * ranges of one thread, so the published value is the running total for the thread and not the
+     * last range alone. It is charged against the same replay budget as every other replayed
+     * update. `startedAtMs` stays out: a replayed card is settled, it shows the duration only.
+     */
+    private async publishSubagentRunDuration(
+        session: ACPSessionConnection,
+        sessionId: string,
+        parentToolCallId: string,
+        childThreadId: string,
+        durationMs: number,
+        budget: ReplayBudgetState,
+        replayedRunMs: Map<string, number>,
+    ): Promise<boolean> {
+        const totalMs = (replayedRunMs.get(childThreadId) ?? 0) + durationMs;
+        replayedRunMs.set(childThreadId, totalMs);
+        return await this.streamCappedHistoryUpdate(session, sessionId, {
+            sessionUpdate: "tool_call_update",
+            toolCallId: parentToolCallId,
+            _meta: {
+                "_universe/subagentTiming": {durationMs: totalMs},
+            },
+        }, budget);
+    }
+
+    private async readChildTurn(
         childThreadId: string,
         index: number,
-    ): Promise<AsyncIterable<ThreadItem[]> | null> {
+    ): Promise<{items: AsyncIterable<ThreadItem[]>; turn: Turn} | null> {
         try {
-            return await this.codexAcpClient.readSessionTurnItems(childThreadId, index);
+            return await this.codexAcpClient.readSessionTurn(childThreadId, index);
         }
         catch (error) {
             logger.error(`Failed to read subagent history ${childThreadId}`, error);
@@ -4265,6 +4350,19 @@ function parseImageDataUrl(url: string): { data: string; mimeType: string } | nu
         return null;
     }
     return { data: match[2], mimeType: match[1] };
+}
+
+/*
+ * Fork addition: how long a turn took, from the span Codex recorded for it. `startedAt` and
+ * `completedAt` are unix seconds; `durationMs` carries the same span in milliseconds when the
+ * producer recorded one. A zero-millisecond span counts as unrecorded, not as a run that took no
+ * time: it would freeze the replayed card at `0s`, the very symptom this reports around.
+ */
+function turnDurationMs(turn: Turn): number | null {
+    if (typeof turn.durationMs === "number" && turn.durationMs > 0) return turn.durationMs;
+    if (typeof turn.startedAt !== "number" || typeof turn.completedAt !== "number") return null;
+    const spanMs = Math.max(0, Math.round((turn.completedAt - turn.startedAt) * 1000));
+    return spanMs > 0 ? spanMs : null;
 }
 
 /** A close of the session stopped the read of its history during `session/load`. */

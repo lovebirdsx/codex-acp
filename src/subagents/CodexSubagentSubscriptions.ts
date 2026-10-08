@@ -5,7 +5,7 @@ import type {
 } from "../CodexAppServerClient";
 import type {ServerNotification} from "../app-server";
 import {isRootAgentPath} from "./CodexAgentPath";
-import {isChildTranscriptNotification} from "./ChildTranscript";
+import {isChildRunEndNotification, isChildTranscriptNotification} from "./ChildTranscript";
 
 type Subscription = {
     rootSessionId: string;
@@ -88,11 +88,21 @@ export class CodexSubagentSubscriptions {
                 }
                 // Fork addition: the work of a direct child, for a client that reads the
                 // sub-agent trail. A grandchild keeps the legacy representation: the trail
-                // of a client without native subagent sessions is one level deep.
+                // of a client without native subagent sessions is one level deep. The end of
+                // a child run takes this route too — it is not trail content but it freezes
+                // the duration on the card.
                 else if (depth === 0
                     && session.current.subagentTranscript
-                    && isChildTranscriptNotification(childEvent)) {
+                    && (isChildTranscriptNotification(childEvent) || isChildRunEndNotification(childEvent))) {
                     session.current.dispatchChild(childEvent);
+                    // Fork addition: the end of a run still clears the transient root state (a
+                    // pending permission or question of the child) the way it did before the
+                    // trail existed, so it takes the interaction route as well.
+                    if (isChildRunEndNotification(childEvent)) {
+                        session.current.enqueueInteraction(
+                            this.rootAttributed(childEvent, session.current.rootSessionId),
+                        );
+                    }
                 }
                 else session.current.enqueueInteraction(this.rootAttributed(childEvent, session.current.rootSessionId));
             });
