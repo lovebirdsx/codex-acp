@@ -42,6 +42,14 @@ export type ToolFacts = {
     terminalExit?: {exitCode: number | null};
     mcp?: boolean;
     subagent?: boolean;
+    /**
+     * Fork addition: the identity of the sub-agent thread that this report describes. An
+     * activity names the thread it reports; a collaboration spawn names the threads it created.
+     * A client without native subagent sessions that declares the `subagent-transcript`
+     * capability reads it as `_meta.codex.subagent`, see `AcpToolCallRenderer.subagentMeta`.
+     * A field is absent while the report does not know it yet.
+     */
+    subagentInfo?: {threadId?: string; path?: string; activity: string};
     contextCompaction?: ContextCompactionMetadata;
     /** The fields of a client that is not AIR, where they differ from the fields above. */
     standard?: StandardToolCallFields;

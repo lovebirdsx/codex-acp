@@ -11,6 +11,9 @@ type CollabAgentToolCallItem = ThreadItem & {type: "collabAgentToolCall"};
  * a collaboration tool call by these three keys.
  * Only a spawn is a subagent. A wait, a message, a resume, or a close controls an existing subagent.
  * A client that is not AIR also gets the Codex `status` in `rawInput`.
+ * The spawn card is the card of the threads it created: a client that reads the sub-agent trail
+ * nests their work under it (`subagentInfo`). The app-server names those threads only in the
+ * completed item.
  */
 export class CollabAgentReporter {
     static started(item: CollabAgentToolCallItem): ToolFacts {
@@ -41,11 +44,17 @@ function facts(item: CollabAgentToolCallItem, report: ToolFacts["report"]): Tool
         title: item.tool,
         status: toToolStatus(item.status),
         input,
-        ...(item.tool === "spawnAgent" ? {subagent: true} : {}),
+        ...(item.tool === "spawnAgent" ? {subagent: true, subagentInfo: spawnInfo(item)} : {}),
         standard: {
             content: null,
             rawInput: {...input, status: item.status},
             rawOutput: null,
         },
     };
+}
+
+function spawnInfo(item: CollabAgentToolCallItem): NonNullable<ToolFacts["subagentInfo"]> {
+    // A spawn that created several threads at once names none of them: the card is theirs.
+    const threadId = item.receiverThreadIds.length === 1 ? item.receiverThreadIds[0] : undefined;
+    return threadId === undefined ? {activity: item.tool} : {threadId, activity: item.tool};
 }

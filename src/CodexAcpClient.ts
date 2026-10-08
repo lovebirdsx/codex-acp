@@ -1206,6 +1206,7 @@ export class CodexAcpClient {
         supportsSubagents: boolean,
         observeInteraction: (result: ServerNotification) => void | Promise<void>,
         waitForChildSession: (childThreadId: string) => Promise<string | null>,
+        observeChildTranscript?: (event: ServerNotification) => void | Promise<void>,
     ) {
         const dispatch = (event: ServerNotification) => {
             this.enqueueSessionNotification(sessionId, () => eventHandler(event));
@@ -1213,7 +1214,14 @@ export class CodexAcpClient {
         this.subagents.subscribe({
             rootSessionId: sessionId,
             supportsSubagents,
+            subagentTranscript: observeChildTranscript !== undefined,
             dispatch,
+            // Fork addition: the child transcript uses the same serialized queue as
+            // ordinary notifications, so a child update never overtakes its card.
+            dispatchChild: (event) => {
+                if (observeChildTranscript === undefined) return;
+                this.enqueueSessionNotification(sessionId, () => observeChildTranscript(event));
+            },
             enqueueInteraction: (event) => {
                 // Child observation uses the same serialized, error-reporting queue
                 // as ordinary session notifications; callers intentionally do not

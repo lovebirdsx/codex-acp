@@ -113,6 +113,27 @@ export class AcpToolCallRenderer {
             ...(end === undefined ? {} : this.commandEndMeta(terminalId, end)),
             ...(facts.standard?.mcpProgress === undefined ? {} : {mcp_output_delta: {data: facts.standard.mcpProgress}}),
             ...mcpMeta(facts),
+            ...this.subagentMeta(facts),
+        };
+    }
+
+    /**
+     * Fork addition: the identity of a sub-agent thread, for a client without native subagent
+     * sessions that declares the `subagent-transcript` capability. The capability gates the key,
+     * because the trail exists only for a client that asked for it: every other client sees no
+     * change. The shape is the one the adapter sent before the AIR tool call contract.
+     */
+    private subagentMeta(facts: ToolFacts): Record<string, unknown> {
+        if (!this.capabilities.subagentTranscript || facts.subagentInfo === undefined) return {};
+        const {threadId, path, activity} = facts.subagentInfo;
+        return {
+            codex: {
+                subagent: {
+                    ...(threadId === undefined ? {} : {threadId}),
+                    ...(path === undefined ? {} : {path}),
+                    activity,
+                },
+            },
         };
     }
 

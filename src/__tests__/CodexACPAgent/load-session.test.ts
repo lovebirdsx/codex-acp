@@ -415,6 +415,322 @@ describe("CodexACPAgent - loadSession", () => {
         expect(updates[secondOutputIndex]?.sessionId).toBe("child-history:generation:2");
     });
 
+    it("replays the work of a sub-agent under its activity card without native subagent sessions", async () => {
+        const fixture = createCodexMockTestFixture();
+        const agent = fixture.getCodexAcpAgent();
+        const client = fixture.getCodexAcpClient();
+        const appServer = fixture.getCodexAppServerClient();
+        client.readAuthRequirement = vi.fn().mockResolvedValue({required: false, account: null});
+        client.getAccount = vi.fn().mockResolvedValue({account: null, requiresOpenaiAuth: false});
+        client.listSkills = vi.fn().mockResolvedValue({data: []});
+        const model = createTestModel();
+        appServer.listModels = vi.fn().mockResolvedValue({data: [model], nextCursor: null});
+
+        const message = (id: string, text: string) => ({
+            type: "agentMessage", id, text, phase: null, memoryCitation: null, delivery: null, questions: null,
+        });
+        const activity = (id: string, kind: "started" | "completed" | "interrupted") => ({
+            type: "subAgentActivity", id, kind, agentThreadId: "child-history", agentPath: "/root/weather",
+        });
+        const child = {
+            id: "child-history",
+            historyMode: "legacy",
+            turns: [
+                {
+                    id: "child-turn-1", itemsView: "full", status: "completed", items: [
+                        {
+                            type: "commandExecution", id: "child-command-1", pluginId: null, scriptPath: null,
+                            command: "curl wttr.in", cwd: "/workspace", processId: "42", source: "agent",
+                            status: "completed", commandActions: [], aggregatedOutput: "Sunny\n",
+                            exitCode: 0, durationMs: 3,
+                        },
+                        message("child-message-1", "Persisted first-generation output"),
+                    ],
+                },
+                {
+                    id: "child-turn-2", itemsView: "full", status: "completed",
+                    items: [message("child-message-2", "Persisted second-generation output")],
+                },
+            ],
+        } as unknown as Thread;
+        // The sub-agent ran twice: each `started` activity is one turn of the child thread.
+        const root = {
+            id: "root-history",
+            historyMode: "legacy",
+            turns: [{
+                id: "root-turn-1", itemsView: "full", status: "completed", items: [
+                    activity("activity-1", "started"),
+                    activity("activity-1-terminal", "completed"),
+                    message("root-message", "Root work between the sub-agents"),
+                    activity("activity-2", "started"),
+                ],
+            }],
+        } as unknown as Thread;
+        appServer.threadResume = vi.fn().mockResolvedValue({
+            thread: root, model: model.id, modelProvider: "openai", cwd: "/workspace",
+            approvalPolicy: "never", sandbox: {type: "dangerFullAccess"},
+            reasoningEffort: model.defaultReasoningEffort,
+        });
+        appServer.threadReadWithHistory = vi.fn().mockResolvedValue({thread: root});
+        appServer.threadRead = vi.fn().mockImplementation(({threadId}) =>
+            Promise.resolve({thread: threadId === "child-history" ? child : root}));
+
+        await agent.initialize({protocolVersion: 1, clientCapabilities: {_meta: {"subagent-transcript": true}}});
+        await agent.loadSession({sessionId: root.id, cwd: "/workspace", mcpServers: []});
+
+        const updates = fixture.getAcpConnectionEvents([])
+            .filter(event => event.method === "sessionUpdate")
+            .map(event => event.args[0]);
+        const indexOf = (predicate: (update: any) => boolean) =>
+            updates.findIndex(({update}) => predicate(update));
+        const cardIndex = indexOf(update => update.toolCallId === "activity-1" && update.sessionUpdate === "tool_call");
+        const commandIndex = indexOf(update => update.toolCallId === "child-command-1");
+        const firstOutputIndex = indexOf(update => update.messageId === "child-message-1");
+        const secondCardIndex = indexOf(update => update.toolCallId === "activity-2" && update.sessionUpdate === "tool_call");
+        const secondOutputIndex = indexOf(update => update.messageId === "child-message-2");
+        // The work of a sub-agent follows the card of the activity that spawned it, and the
+        // terminal activity replays nothing a second time.
+        expect(cardIndex).toBeGreaterThan(-1);
+        expect(commandIndex).toBeGreaterThan(cardIndex);
+        expect(firstOutputIndex).toBeGreaterThan(commandIndex);
+        expect(secondCardIndex).toBeGreaterThan(firstOutputIndex);
+        expect(secondOutputIndex).toBeGreaterThan(secondCardIndex);
+        expect(updates.filter(({update}) => update.messageId === "child-message-1")).toHaveLength(1);
+        // The terminal activity replays no second copy of the first-generation work: the command
+        // card (its `tool_call` and its update) stays ahead of the second card.
+        expect(Math.max(...updates.map(({update}, index) =>
+            update.toolCallId === "child-command-1" ? index : -1))).toBeLessThan(secondCardIndex);
+
+        const parentOf = (index: number) => updates[index]?.update._meta?.codex?.parentToolCallId;
+        expect(parentOf(commandIndex)).toBe("activity-1");
+        expect(parentOf(firstOutputIndex)).toBe("activity-1");
+        expect(parentOf(secondOutputIndex)).toBe("activity-2");
+        // Every replayed update stays on the session of the root thread.
+        for (const {sessionId} of updates) expect(sessionId).toBe("root-history");
+        const rootMessage = updates[indexOf(update => update.messageId === "root-message")];
+        expect(rootMessage?.update._meta?.codex?.parentToolCallId).toBeUndefined();
+    });
+
+    it("keeps a session loadable when the history of a sub-agent cannot be read", async () => {
+        const fixture = createCodexMockTestFixture();
+        const agent = fixture.getCodexAcpAgent();
+        const client = fixture.getCodexAcpClient();
+        const appServer = fixture.getCodexAppServerClient();
+        client.readAuthRequirement = vi.fn().mockResolvedValue({required: false, account: null});
+        client.getAccount = vi.fn().mockResolvedValue({account: null, requiresOpenaiAuth: false});
+        client.listSkills = vi.fn().mockResolvedValue({data: []});
+        const model = createTestModel();
+        appServer.listModels = vi.fn().mockResolvedValue({data: [model], nextCursor: null});
+
+        const root = {
+            id: "root-history",
+            historyMode: "legacy",
+            turns: [{
+                id: "root-turn-1", itemsView: "full", status: "completed", items: [
+                    {type: "subAgentActivity", id: "activity-1", kind: "started", agentThreadId: "child-history", agentPath: "/root/weather"},
+                    {type: "agentMessage", id: "root-message", text: "Root work after the sub-agent", phase: null, memoryCitation: null, delivery: null, questions: null},
+                ],
+            }],
+        } as unknown as Thread;
+        appServer.threadResume = vi.fn().mockResolvedValue({
+            thread: root, model: model.id, modelProvider: "openai", cwd: "/workspace",
+            approvalPolicy: "never", sandbox: {type: "dangerFullAccess"},
+            reasoningEffort: model.defaultReasoningEffort,
+        });
+        appServer.threadReadWithHistory = vi.fn().mockResolvedValue({thread: root});
+        appServer.threadRead = vi.fn().mockImplementation(({threadId}) => threadId === "child-history"
+            ? Promise.reject(new Error("missing child history"))
+            : Promise.resolve({thread: root}));
+
+        await agent.initialize({protocolVersion: 1, clientCapabilities: {_meta: {"subagent-transcript": true}}});
+        await agent.loadSession({sessionId: root.id, cwd: "/workspace", mcpServers: []});
+
+        const updates = fixture.getAcpConnectionEvents([])
+            .filter(event => event.method === "sessionUpdate")
+            .map(event => event.args[0].update);
+        // The trail of the unreadable sub-agent is lost; the rest of the history is not.
+        expect(updates.some(update => update.toolCallId === "activity-1")).toBe(true);
+        expect(updates.some(update => update.messageId === "root-message")).toBe(true);
+        expect(updates.some(update => update._meta?.codex?.parentToolCallId !== undefined)).toBe(false);
+    });
+
+    it("replays the work of a collaboration spawn under its card without native subagent sessions", async () => {
+        const fixture = createCodexMockTestFixture();
+        const agent = fixture.getCodexAcpAgent();
+        const client = fixture.getCodexAcpClient();
+        const appServer = fixture.getCodexAppServerClient();
+        client.readAuthRequirement = vi.fn().mockResolvedValue({required: false, account: null});
+        client.getAccount = vi.fn().mockResolvedValue({account: null, requiresOpenaiAuth: false});
+        client.listSkills = vi.fn().mockResolvedValue({data: []});
+        const model = createTestModel();
+        appServer.listModels = vi.fn().mockResolvedValue({data: [model], nextCursor: null});
+
+        const message = (id: string, text: string) => ({
+            type: "agentMessage", id, text, phase: null, memoryCitation: null, delivery: null, questions: null,
+        });
+        const collab = (id: string, tool: string) => ({
+            type: "collabAgentToolCall", id, tool, status: "completed", senderThreadId: "root-history",
+            receiverThreadIds: ["child-history"], prompt: "Run echo alpha.", model: null, reasoningEffort: null,
+            agentsStates: {"child-history": {status: "completed", message: "alpha"}},
+        });
+        const child = {
+            id: "child-history",
+            historyMode: "legacy",
+            turns: [
+                {
+                    id: "child-turn-1", itemsView: "full", status: "completed", items: [
+                        {
+                            type: "commandExecution", id: "child-command-1", pluginId: null, scriptPath: null,
+                            command: "echo alpha", cwd: "/workspace", processId: "42", source: "agent",
+                            status: "completed", commandActions: [], aggregatedOutput: "alpha\n",
+                            exitCode: 0, durationMs: 3,
+                        },
+                        message("child-message-1", "alpha"),
+                    ],
+                },
+                {
+                    id: "child-turn-2", itemsView: "full", status: "completed",
+                    items: [message("child-message-2", "beta")],
+                },
+            ],
+        } as unknown as Thread;
+        const root = {
+            id: "root-history",
+            historyMode: "legacy",
+            turns: [{
+                id: "root-turn-1", itemsView: "full", status: "completed", items: [
+                    collab("spawn-1", "spawnAgent"),
+                    // A second spawn that names the same thread replays no second copy of it.
+                    collab("spawn-2", "spawnAgent"),
+                    // A control call neither: it never takes the trail of a thread.
+                    collab("wait-1", "wait"),
+                    // An activity for a thread a spawn already replayed in full is skipped.
+                    {
+                        type: "subAgentActivity", id: "activity-1", kind: "started",
+                        agentThreadId: "child-history", agentPath: "/root/weather",
+                    },
+                    message("root-message", "Root work after the sub-agent"),
+                ],
+            }],
+        } as unknown as Thread;
+        appServer.threadResume = vi.fn().mockResolvedValue({
+            thread: root, model: model.id, modelProvider: "openai", cwd: "/workspace",
+            approvalPolicy: "never", sandbox: {type: "dangerFullAccess"},
+            reasoningEffort: model.defaultReasoningEffort,
+        });
+        appServer.threadReadWithHistory = vi.fn().mockResolvedValue({thread: root});
+        appServer.threadRead = vi.fn().mockImplementation(({threadId}) =>
+            Promise.resolve({thread: threadId === "child-history" ? child : root}));
+
+        await agent.initialize({protocolVersion: 1, clientCapabilities: {_meta: {"subagent-transcript": true}}});
+        await agent.loadSession({sessionId: root.id, cwd: "/workspace", mcpServers: []});
+
+        const updates = fixture.getAcpConnectionEvents([])
+            .filter(event => event.method === "sessionUpdate")
+            .map(event => event.args[0]);
+        const indexOf = (predicate: (update: any) => boolean) =>
+            updates.findIndex(({update}) => predicate(update));
+        const cardIndex = indexOf(update => update.toolCallId === "spawn-1" && update.sessionUpdate === "tool_call");
+        const commandIndex = indexOf(update => update.toolCallId === "child-command-1");
+        const firstTurnIndex = indexOf(update => update.messageId === "child-message-1");
+        const secondTurnIndex = indexOf(update => update.messageId === "child-message-2");
+        const rootMessageIndex = indexOf(update => update.messageId === "root-message");
+        // The work of the child follows the card of the spawn, and the thread outlives its spawn:
+        // Codex added a turn to it and every turn of it belongs under the same card.
+        expect(cardIndex).toBeGreaterThan(-1);
+        expect(commandIndex).toBeGreaterThan(cardIndex);
+        expect(firstTurnIndex).toBeGreaterThan(commandIndex);
+        expect(secondTurnIndex).toBeGreaterThan(firstTurnIndex);
+        expect(rootMessageIndex).toBeGreaterThan(secondTurnIndex);
+        // The second spawn, the control call and the activity of the same thread replay no
+        // second copy of the trail: every turn of the child goes out once.
+        expect(updates.filter(({update}) => update.messageId === "child-message-1")).toHaveLength(1);
+        expect(updates.filter(({update}) => update.messageId === "child-message-2")).toHaveLength(1);
+        // The card of the spawn is the card of the sub-agent.
+        expect(updates[cardIndex]?.update._meta?.codex?.subagent).toEqual({
+            activity: "spawnAgent", threadId: "child-history",
+        });
+
+        const parentOf = (index: number) => updates[index]?.update._meta?.codex?.parentToolCallId;
+        expect(parentOf(commandIndex)).toBe("spawn-1");
+        expect(parentOf(firstTurnIndex)).toBe("spawn-1");
+        expect(parentOf(secondTurnIndex)).toBe("spawn-1");
+        expect(parentOf(rootMessageIndex)).toBeUndefined();
+        // The activity card of a thread that a spawn already replayed stays empty.
+        expect(updates.some(({update}) => update._meta?.codex?.parentToolCallId === "activity-1")).toBe(false);
+        // Every replayed update stays on the session of the root thread.
+        for (const {sessionId} of updates) expect(sessionId).toBe("root-history");
+    });
+
+    it("continues the collaboration trail after the turns an activity already replayed", async () => {
+        const fixture = createCodexMockTestFixture();
+        const agent = fixture.getCodexAcpAgent();
+        const client = fixture.getCodexAcpClient();
+        const appServer = fixture.getCodexAppServerClient();
+        client.readAuthRequirement = vi.fn().mockResolvedValue({required: false, account: null});
+        client.getAccount = vi.fn().mockResolvedValue({account: null, requiresOpenaiAuth: false});
+        client.listSkills = vi.fn().mockResolvedValue({data: []});
+        const model = createTestModel();
+        appServer.listModels = vi.fn().mockResolvedValue({data: [model], nextCursor: null});
+
+        const message = (id: string, text: string) => ({
+            type: "agentMessage", id, text, phase: null, memoryCitation: null, delivery: null, questions: null,
+        });
+        const child = {
+            id: "child-history",
+            historyMode: "legacy",
+            turns: [
+                {id: "child-turn-1", itemsView: "full", status: "completed", items: [message("child-message-1", "alpha")]},
+                {id: "child-turn-2", itemsView: "full", status: "completed", items: [message("child-message-2", "beta")]},
+            ],
+        } as unknown as Thread;
+        const root = {
+            id: "root-history",
+            historyMode: "legacy",
+            turns: [{
+                id: "root-turn-1", itemsView: "full", status: "completed", items: [
+                    {
+                        type: "subAgentActivity", id: "activity-1", kind: "started",
+                        agentThreadId: "child-history", agentPath: "/root/weather",
+                    },
+                    // The spawn names the same thread: the turn the activity replayed is behind it.
+                    {
+                        type: "collabAgentToolCall", id: "spawn-1", tool: "spawnAgent", status: "completed",
+                        senderThreadId: "root-history", receiverThreadIds: ["child-history"],
+                        prompt: "Run echo alpha.", model: null, reasoningEffort: null,
+                        agentsStates: {"child-history": {status: "completed", message: "beta"}},
+                    },
+                ],
+            }],
+        } as unknown as Thread;
+        appServer.threadResume = vi.fn().mockResolvedValue({
+            thread: root, model: model.id, modelProvider: "openai", cwd: "/workspace",
+            approvalPolicy: "never", sandbox: {type: "dangerFullAccess"},
+            reasoningEffort: model.defaultReasoningEffort,
+        });
+        appServer.threadReadWithHistory = vi.fn().mockResolvedValue({thread: root});
+        appServer.threadRead = vi.fn().mockImplementation(({threadId}) =>
+            Promise.resolve({thread: threadId === "child-history" ? child : root}));
+
+        await agent.initialize({protocolVersion: 1, clientCapabilities: {_meta: {"subagent-transcript": true}}});
+        await agent.loadSession({sessionId: root.id, cwd: "/workspace", mcpServers: []});
+
+        const updates = fixture.getAcpConnectionEvents([])
+            .filter(event => event.method === "sessionUpdate")
+            .map(event => event.args[0]);
+        const indexOf = (predicate: (update: any) => boolean) =>
+            updates.findIndex(({update}) => predicate(update));
+        const firstTurnIndex = indexOf(update => update.messageId === "child-message-1");
+        const secondTurnIndex = indexOf(update => update.messageId === "child-message-2");
+        // The turn the activity replayed goes out under its card, the rest under the spawn card,
+        // and no turn of the thread goes out twice.
+        expect(firstTurnIndex).toBeGreaterThan(-1);
+        expect(secondTurnIndex).toBeGreaterThan(firstTurnIndex);
+        expect(updates.filter(({update}) => update.messageId === "child-message-1")).toHaveLength(1);
+        expect(updates[firstTurnIndex]?.update._meta?.codex?.parentToolCallId).toBe("activity-1");
+        expect(updates[secondTurnIndex]?.update._meta?.codex?.parentToolCallId).toBe("spawn-1");
+    });
+
     it("should replay history during loadSession", async () => {
         const fixture = createCodexMockTestFixture();
         const codexAcpAgent = fixture.getCodexAcpAgent();

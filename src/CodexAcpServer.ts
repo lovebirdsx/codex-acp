@@ -152,7 +152,8 @@ import {
     type SubagentAwareSessionCapabilities,
 } from "./subagents/AcpSubagents";
 import {CodexSubagentEventRouter} from "./subagents/CodexSubagentEventRouter";
-import {nameFromAgentPath} from "./subagents/CodexAgentPath";
+import {isChildTranscriptItem, stampChildParentToolCallId} from "./subagents/ChildTranscript";
+import {isRootAgentPath, nameFromAgentPath} from "./subagents/CodexAgentPath";
 import {
     accountFromUpdated,
     fromAccount,
@@ -208,6 +209,12 @@ export interface SessionState {
     lastTokenUsage: TokenCount | null;
     totalTokenUsage: TokenCount | null;
     subagentTokenUsage: Map<string, TokenCount>;
+    /*
+     * Fork addition: the `subAgentActivity` card of each sub-agent thread, keyed by app-server thread
+     * id. The state lives in the session, not in the prompt handler, so a sub-agent stays attributed
+     * across prompts. `CodexEventHandler.recordSubagentThread` writes it.
+     */
+    subagentParentItemByThreadId: Map<string, string>;
     modelContextWindow: number | null;
     modelKnownInCatalog: boolean;
     rateLimits: RateLimitsMap | null;
@@ -849,6 +856,7 @@ export class CodexAcpServer {
             lastTokenUsage: null,
             totalTokenUsage: null,
             subagentTokenUsage: new Map(),
+            subagentParentItemByThreadId: new Map(),
             modelContextWindow: null,
             modelKnownInCatalog: this.isModelInCatalogue(catalogueModels, currentModelId),
             rateLimits: null,
@@ -2494,6 +2502,7 @@ export class CodexAcpServer {
             lastTokenUsage: null,
             totalTokenUsage: null,
             subagentTokenUsage: new Map(),
+            subagentParentItemByThreadId: new Map(),
             modelContextWindow: null,
             modelKnownInCatalog: this.isModelInCatalogue(catalogueModels, currentModelId),
             rateLimits: null,
@@ -2596,6 +2605,8 @@ export class CodexAcpServer {
                 userInputReplay,
             );
         } else {
+            const generations = new Map<string, number>();
+            const replayedChildren = new Set<string>();
             for await (const items of itemPages) {
                 for (const item of items) {
                     if (!isOpen()) throw new SessionClosedDuringLoadError();
@@ -2609,6 +2620,60 @@ export class CodexAcpServer {
                         userInputReplay,
                     )) {
                         return;
+                    }
+                    // Fork addition: the work of the sub-agent whose activity card just went out,
+                    // for a client that reads the trail without native subagent sessions. Each
+                    // `started` activity is one turn of the child thread, as in the native replay.
+                    // A thread a collaboration spawn already replayed in full is skipped: that
+                    // replay covers every turn of it.
+                    if (this.capabilities.subagentTranscript
+                        && item.type === "subAgentActivity"
+                        && item.kind === "started"
+                        && !isRootAgentPath(item.agentPath)
+                        && !replayedChildren.has(item.agentThreadId)) {
+                        const generation = (generations.get(item.agentThreadId) ?? 0) + 1;
+                        generations.set(item.agentThreadId, generation);
+                        if (!await this.streamLegacyChildHistory(
+                            session,
+                            sessionId,
+                            item.id,
+                            item.agentThreadId,
+                            generation,
+                            sessionState,
+                            budget,
+                            isOpen,
+                        )) {
+                            return;
+                        }
+                    }
+                    // Fork addition: the work of the threads a collaboration spawned, under the
+                    // card of the spawn, for the same client. The app-server names those threads
+                    // in the spawn item of the history.
+                    if (this.capabilities.subagentTranscript
+                        && item.type === "collabAgentToolCall"
+                        && item.tool === "spawnAgent") {
+                        for (const childThreadId of item.receiverThreadIds) {
+                            if (childThreadId === ""
+                                || childThreadId === sessionId
+                                || replayedChildren.has(childThreadId)) {
+                                continue;
+                            }
+                            replayedChildren.add(childThreadId);
+                            if (!await this.streamLegacyCollaborationHistory(
+                                session,
+                                sessionId,
+                                item.id,
+                                childThreadId,
+                                // The activity branch replays the leading turns of a thread that
+                                // it also names: the collaboration replay continues after them.
+                                generations.get(childThreadId) ?? 0,
+                                sessionState,
+                                budget,
+                                isOpen,
+                            )) {
+                                return;
+                            }
+                        }
                     }
                 }
             }
@@ -2856,6 +2921,125 @@ export class CodexAcpServer {
                 state: "disconnected",
             });
         }
+    }
+
+    /*
+     * Fork addition: the history of one generation of a sub-agent, for a client that reads the
+     * trail without native subagent sessions. The equivalent of `streamNativeThreadHistory` for
+     * that client: the items go on the root session, attributed to the activity card that spawned
+     * the thread, and they share the replay byte budget of the thread. Returns false when the
+     * budget is spent: the caller stops the replay.
+     *
+     * A child that cannot be read costs its own trail, not the session.
+     */
+    private async streamLegacyChildHistory(
+        session: ACPSessionConnection,
+        sessionId: string,
+        parentToolCallId: string,
+        childThreadId: string,
+        generation: number,
+        sessionState: SessionState,
+        budget: ReplayBudgetState,
+        isOpen: () => boolean,
+    ): Promise<boolean> {
+        const childItems = await this.readChildTurnItems(childThreadId, generation - 1);
+        if (childItems === null) return true;
+        return await this.streamChildTurn(
+            session,
+            sessionId,
+            parentToolCallId,
+            childThreadId,
+            childItems,
+            sessionState,
+            budget,
+            isOpen,
+        );
+    }
+
+    /*
+     * Fork addition: everything a spawned collaboration thread did, for a client that reads the
+     * trail without native subagent sessions. The thread outlives its spawn: Codex adds turns to
+     * it when the agent sends it more input, and every one of them belongs under the spawn card.
+     * `firstTurn` skips the turns the activity branch already replayed for the same thread, so no
+     * turn of a thread is replayed twice. A turn that cannot be read stops the trail of that
+     * thread, not the session. The turns are read one by one, which costs one metadata read per
+     * turn: a collaboration thread holds a handful of turns, and the budget ends a long trail.
+     */
+    private async streamLegacyCollaborationHistory(
+        session: ACPSessionConnection,
+        sessionId: string,
+        parentToolCallId: string,
+        childThreadId: string,
+        firstTurn: number,
+        sessionState: SessionState,
+        budget: ReplayBudgetState,
+        isOpen: () => boolean,
+    ): Promise<boolean> {
+        for (let index = firstTurn; ; index++) {
+            const childItems = await this.readChildTurnItems(childThreadId, index);
+            if (childItems === null) return true;
+            if (!await this.streamChildTurn(
+                session,
+                sessionId,
+                parentToolCallId,
+                childThreadId,
+                childItems,
+                sessionState,
+                budget,
+                isOpen,
+            )) {
+                return false;
+            }
+        }
+    }
+
+    private async readChildTurnItems(
+        childThreadId: string,
+        index: number,
+    ): Promise<AsyncIterable<ThreadItem[]> | null> {
+        try {
+            return await this.codexAcpClient.readSessionTurnItems(childThreadId, index);
+        }
+        catch (error) {
+            logger.error(`Failed to read subagent history ${childThreadId}`, error);
+            return null;
+        }
+    }
+
+    private async streamChildTurn(
+        session: ACPSessionConnection,
+        sessionId: string,
+        parentToolCallId: string,
+        childThreadId: string,
+        childItems: AsyncIterable<ThreadItem[]>,
+        sessionState: SessionState,
+        budget: ReplayBudgetState,
+        isOpen: () => boolean,
+    ): Promise<boolean> {
+        try {
+            for await (const items of untilSessionClose(childItems, isOpen)) {
+                for (const item of items) {
+                    if (!isOpen()) throw new SessionClosedDuringLoadError();
+                    if (!isChildTranscriptItem(item)) continue;
+                    for (const update of await this.createHistoryUpdates(item, sessionState)) {
+                        if (!await this.streamCappedHistoryUpdate(
+                            session,
+                            sessionId,
+                            stampChildParentToolCallId(update, parentToolCallId),
+                            budget,
+                        )) {
+                            return false;
+                        }
+                    }
+                }
+            }
+        }
+        catch (error) {
+            if (error instanceof SessionClosedDuringLoadError) throw error;
+            // The child pages are read lazily: a child that fails midway keeps what it sent.
+            logger.error(`Failed to read subagent history ${childThreadId}`, error);
+        }
+        return true;
     }
 
     private async publishThreadHistoryTitle(
@@ -3511,7 +3695,12 @@ export class CodexAcpServer {
                 elicitationHandler,
                 clientSupportsSubagents(this.clientCapabilities),
                 observeInteraction,
-                childThreadId => promptEventHandler.waitForNativeSubagentSession(childThreadId));
+                childThreadId => promptEventHandler.waitForNativeSubagentSession(childThreadId),
+                // Fork addition: the work of a sub-agent, for a client that reads the trail
+                // without native subagent sessions (universe-editor).
+                this.capabilities.subagentTranscript
+                    ? event => promptEventHandler.handleChildTranscript(event)
+                    : undefined);
 
             if (activePrompt.signal.aborted) {
                 return cancelledPromptResponse();

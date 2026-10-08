@@ -437,6 +437,7 @@ export function createTestSessionState(overrides?: Partial<SessionState>): Sessi
         sessionTitleSource: "unknown",
         compactions: new CodexSessionCompactions(),
         toolCallReports: new ToolCallReports(),
+        subagentParentItemByThreadId: new Map(),
         subagents: new CodexSubagentEventRouter(
             sessionId,
             false,

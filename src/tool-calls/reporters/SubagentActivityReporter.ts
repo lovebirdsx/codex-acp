@@ -22,6 +22,7 @@ export class SubagentActivityReporter {
                 activityKind: item.kind,
             },
             subagent: true,
+            subagentInfo: {threadId: item.agentThreadId, path: item.agentPath, activity: item.kind},
         };
     }
 }

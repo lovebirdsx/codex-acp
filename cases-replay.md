@@ -55,3 +55,24 @@ live 侧的提问卡片（见下节）必须能在恢复会话里重放，但 ty
 - `ReplayBudget.ts`：`capReplayUpdate(update, maxFieldBytes=1MB)` **递归遍历 update 的所有字符串字段**做截断（**刻意不按 item 类型 switch**——任何 thread item 类型新加重字段当天即被覆盖，不会静默绕过），返回截断后字节数供累计记账；`REPLAY_TOTAL_CAP_BYTES=96MB`。`streamCappedHistoryUpdate` 逐条 `capReplayUpdate` + 累计，超限时 logger 记录并发一条 `agent_message_chunk` 说明后令 `streamHistoryItem` 返回 false，两条回放路径（legacy 循环与 `streamNativeThreadHistory` 的嵌套子会话）都据此提前 return（**从头发、超限停 = 丢较新的尾部**，与 claude fork 同向；不 fail 整个 resume，会话仍带较早历史打开）。预算对象 `ReplayBudgetState` 由 `streamThreadHistory` 创建，嵌套子会话共用同一份。
 - 配套测试 `src/__tests__/ReplayBudget.test.ts`（5 例：小 update 保持引用同一性 / 命令输出在 text block 与 rawOutput **两份**都被截断 / diff 双侧截断 / 巨型 payload 记账受 cap 约束 / 循环引用不爆栈）。
 - **ReplayFileRead.ts（保留）**：`readFileWithinCap`（stat 先判再读，`REPLAY_ROLLOUT_READ_CAP_BYTES=64MB`）现只守提问卡片那一次 rollout 读取——超限文件绝不物化，只丢卡片。旧 fork 守的两个磁盘读（回放重建 diff 读文件全文、rollout fallback 读整份 JSONL）里，前者已随 typed-item 重构消失（diff 由 codex 的 `FileUpdateChange.diff` 重建，上游 `FileChangeReporter` 自带 `fitsDiffLimit` 尺寸闸）；配套测试 `src/__tests__/ReplayFileRead.test.ts`。
+
+## 非原生子 Agent 回放
+
+（`src/CodexAcpServer.ts` `streamThreadHistory` 的 legacy else 分支 + 新增私有 `streamLegacyChildHistory`；取数 `src/CodexAcpClient.ts` `readSessionTurnItems`）
+
+**问题**：能力位 `subagent-transcript` 的客户端（编辑器）resume 时，子 agent 的工具卡与文本必须回到它父卡里，否则「live 有、resume 丢」。原生子会话 client 走 `streamNativeThreadHistory`（`subagent_spawned` + 独立 sessionId），非原生 client 原来只扁平回放 `subAgentActivity` 卡。
+
+**做法**：legacy else 分支的叶子循环遇到 `item.type === "subAgentActivity" && item.kind === "started" && !isRootAgentPath(item.agentPath)` 时，先把父卡 `streamHistoryItem` 出去，再 `await this.streamLegacyChildHistory(...)` 回放该子线程**本次世代**的工作。世代计数按 `agentThreadId` 累加（`generations` map），取数与原生路径**同一个** `readSessionTurnItems(agentThreadId, generation - 1)`——`started` 次数 = 世代 = turn 序号（子线程的每一代是它的一个 turn，实测与 `native-subagent-session` / `load-session` fixture 一致），不新增 RPC 封装；只有**直接子线程**被读，孙线程天然不可达（一层深度与 live 一致）。
+
+- 每条 update 盖 `_meta.codex.parentToolCallId = <父卡 item id>`（与 live 同一处 `stampChildParentToolCallId`），并落**根 sessionId**；item 过滤复用 `isChildTranscriptItem`（与 live 同一份白名单）。
+- **协作 spawn 的子线程按全轮回放**：同一个循环遇到 `collabAgentToolCall && tool === "spawnAgent"` 时，对每个 `receiverThreadIds` 调 `streamLegacyCollaborationHistory`——从 turn 0 起逐轮 `readSessionTurnItems` 直到返回 null。**为什么是全轮**：协作线程比 spawn 活得久，`sendInput` 会给它追加 turn，那些工作同样属于这张卡（真机委派路径就是协作工具，见 cases-session.md 的同名一节）。`streamLegacyChildHistory`（世代语义）与它共用 `readChildTurnItems`（try/catch + 日志，失败/轮数用尽都返回 null）与 `streamChildTurn`（白名单 + 盖父 id + 计量），单轮行为不变。
+- **两条路径不重复回放同一线程**：`replayedChildren` 集合同时挡住「同名线程的第二个 spawn 项」与「spawn 之后的 activity 项」；反向顺序（activity 先、spawn 后）则用 `generations` 做**前缀接续**——spawn 从 `generations.get(thread) ?? 0` 起回放，即跳过 activity 已回放的那几个 turn。效果是「同一子线程的每个 turn 恰好回放一次」，父卡按先到者分配。三个跳过条件：空 id、`childThreadId === sessionId`（防 `receiverThreadIds` 报根线程，live 的 `discover` 也有同一守卫）、已回放过。
+- **逐轮读取是 O(K²)**（每个 index 都重做一次 `threadRead` 元数据 + 从第 0 页重扫 `threadTurnPages`）：接受的成本，协作线程通常只有个位数 turn，且长尾会被同一份 `budget` 提前结束；真要优化先取一次 turn 列表再逐轮读，但那要新增 client 方法，与「fork diff 最小」冲突。
+- **复用 `streamThreadHistory` 已建的同一个 `budget`**（`ReplayBudgetState`）：单字段 1MB / 全局 96MB 与根历史共用一份，超限时 `streamCappedHistoryUpdate` 自己发提示并返回 false → 子 walker 返回 false → 根 walker `return`（丢较新的尾部，不 fail resume）。
+- **必须 await，禁 fire-and-forget**：它在 `session/load` 的 `beginHistoryReplay()/endHistoryReplay()` 窗口内（claude fork 曾有子 agent 回放撑爆 renderer 5.5GB 的前例）。
+- **失败只丢该子线程**：`readSessionTurnItems` 与分页读取都 `try/catch`（`SessionClosedDuringLoadError` 除外，它必须继续抛），记 `Failed to read subagent history` 日志后返回 true，会话照常打开、根历史继续回放。
+- 回放的子文本来自子 turn 的 `agentMessage` **item**（「非原生（编辑器）子 Agent 留痕」一节的 live 侧则靠 `item/agentMessage/delta`）——这是 `TRANSCRIPT_ITEM_TYPES` 收录 `agentMessage` 的唯一原因，根线程渲染器对两种事件都返回 null，故 live 不重复。
+
+**v1 已知缺口**：子线程自己的 `request_user_input` 卡片不回放（`RequestUserInputReplay` 只覆盖根 rollout）；子线程 interrupted 尾迹不补；子线程的权限卡与后台终端（`asyncTasks.recover`）不恢复——原生路径有，非原生路径没有。
+
+**配套测试**：`src/__tests__/CodexACPAgent/load-session.test.ts`「replays the work of a sub-agent under its activity card without native subagent sessions」（两代各自的父卡 id、顺序在父卡之后、terminal activity 不重复回放、全部落根 sessionId、根消息不带父 id）与「keeps a session loadable when the history of a sub-agent cannot be read」（读失败只丢该子线程的痕迹，根历史照常）、「replays the work of a collaboration spawn under its card without native subagent sessions」（spawn 卡带 `codex.subagent`、子线程两个 turn 都归该卡且顺序在卡后、第二个 spawn 项 / `wait` 控制项 / 同名 activity 都不重复回放、根消息不带父 id）、「continues the collaboration trail after the turns an activity already replayed」（activity 先到时的前缀接续：第 1 个 turn 归 activity 卡、第 2 个归 spawn 卡，且不重复）。

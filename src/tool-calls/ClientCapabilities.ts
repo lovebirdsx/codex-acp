@@ -10,6 +10,13 @@ import {
 /** The `_meta` key of a command output chunk. */
 type TerminalOutputKey = "terminal_output" | "terminal_output_delta";
 
+/**
+ * Fork addition: the `_meta` capability of the client that reads the sub-agent trail of a
+ * client without native subagent sessions. The claude fork reads the same literal from its
+ * own `clientCapabilities._meta`; the universe-editor sends one payload to both forks.
+ */
+const SUBAGENT_TRANSCRIPT_CAPABILITY = "subagent-transcript";
+
 /** The AIR capabilities that change the tool call and plan reports. */
 export type AirCapabilities = {
     /** AIR renders `rawInput` itself, so the adapter sends no display copy of the input in `content`. */
@@ -25,6 +32,7 @@ type ClientCapabilityValues = {
     readonly terminalOutput: boolean;
     readonly terminalOutputDelta: boolean;
     readonly planUpdates: boolean;
+    readonly subagentTranscript: boolean;
     readonly air: AirCapabilities;
 };
 
@@ -41,6 +49,7 @@ export class ClientCapabilities {
         terminalOutput: false,
         terminalOutputDelta: false,
         planUpdates: false,
+        subagentTranscript: false,
         air: {rawInputRendering: false, planContentDelta: false, diffPatch: false},
     });
 
@@ -52,6 +61,8 @@ export class ClientCapabilities {
     readonly terminalOutputDelta: boolean;
     /** The client shows `plan_update`. Other clients get the plan as agent message text. */
     readonly planUpdates: boolean;
+    /** The client reads the sub-agent trail of a client without native subagent sessions. */
+    readonly subagentTranscript: boolean;
     readonly air: AirCapabilities;
 
     private constructor(values: ClientCapabilityValues) {
@@ -59,6 +70,7 @@ export class ClientCapabilities {
         this.terminalOutput = values.terminalOutput;
         this.terminalOutputDelta = values.terminalOutputDelta;
         this.planUpdates = values.planUpdates;
+        this.subagentTranscript = values.subagentTranscript;
         this.air = values.air;
     }
 
@@ -68,6 +80,7 @@ export class ClientCapabilities {
             terminalOutput: capabilities?._meta?.["terminal_output"] === true,
             terminalOutputDelta: capabilities?._meta?.["terminal_output_delta"] === true,
             planUpdates: capabilities?.plan != null,
+            subagentTranscript: capabilities?._meta?.[SUBAGENT_TRANSCRIPT_CAPABILITY] === true,
             air: {
                 rawInputRendering: clientSupportsAirCapability(capabilities, AIR_RAW_INPUT_RENDERING_KEY),
                 planContentDelta: clientSupportsAirCapability(capabilities, AIR_PLAN_CONTENT_DELTA_KEY),

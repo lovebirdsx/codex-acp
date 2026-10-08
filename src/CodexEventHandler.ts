@@ -62,6 +62,8 @@ import {
     JETBRAINS_META_KEY,
 } from "./AirExtension";
 import {CodexSubagentEventRouter} from "./subagents/CodexSubagentEventRouter";
+import {isChildTranscriptNotification, stampChildParentToolCallId} from "./subagents/ChildTranscript";
+import {PendingNotificationBuffer} from "./subagents/PendingNotificationBuffer";
 import type {SubagentState} from "./subagents/AcpSubagents";
 import {mergeRateLimitSnapshot} from "./RateLimitsMap";
 import {AGENT_FILE_CHANGE_REPORT_MAX_DIFF_BYTES} from "./AgentFileChangeReport";
@@ -203,6 +205,8 @@ export class CodexEventHandler {
      */
     private static readonly LIVENESS_PROBE_INTERVAL_MS = 30_000;
     private static readonly LIVENESS_PROBE_TIMEOUT_MS = 10_000;
+    /** Fork addition: the sub-agent threads whose child updates wait for their card. */
+    private static readonly MAX_PENDING_SUBAGENT_THREADS = 16;
 
     private readonly sessionState: SessionState;
     private readonly supportsTypedSessionFailures: boolean;
@@ -234,10 +238,18 @@ export class CodexEventHandler {
     /** Connection-level `authStatus` sink; the app-server account push feeds it. */
     private readonly onAccountUpdated: ((notification: AccountUpdatedNotification) => void) | undefined;
     /*
-     * Fork addition: the legacy sub-agent card a thread's token usage is
-     * stamped onto (`_universe/subagentStats`). Keyed by app-server thread id.
+     * Fork addition: the updates of a child thread that arrived before the card of its sub-agent
+     * activity (Codex emits child output directly after the spawning collaboration item, and the
+     * activity item may follow). Bounded by `MAX_PENDING_SUBAGENT_THREADS`, and only for the
+     * sub-agents of one prompt.
      */
-    private readonly subagentActivityItemByThreadId = new Map<string, string>();
+    private readonly pendingChildTranscript = new Map<string, PendingNotificationBuffer>();
+    /*
+     * Fork addition: the card of a sub-agent thread for a client that reads no trail, keyed by
+     * app-server thread id. The prompt handler is built per prompt, so this map is the
+     * per-prompt bookkeeping such a client had before the trail existed, see `subagentParents`.
+     */
+    private readonly subagentCardOfPrompt = new Map<string, string>();
 
     /*
      * Fork addition: liveness probe state. `probeLiveness` is injected as a
@@ -446,6 +458,9 @@ export class CodexEventHandler {
             await this.session.update(updateEvent, this.subagents.notificationSessionId(notification));
             this.lastForwardedAt = Date.now();
         }
+        // Fork addition: a sub-agent activity card names the card of its thread, so the child
+        // updates that waited for it go out after it.
+        await this.flushPendingChildTranscript();
     }
 
     async waitForNativeSubagentSession(childThreadId: string): Promise<string | null> {
@@ -515,6 +530,8 @@ export class CodexEventHandler {
         this.disposed = true;
         this.turnDiffs.clear();
         this.oversizedTurnDiffs.clear();
+        // Fork addition: buffered child updates of a card that never arrived are done waiting.
+        this.pendingChildTranscript.clear();
     }
 
     /*
@@ -910,6 +927,7 @@ export class CodexEventHandler {
                 this.activeImageGenerationItems.add(event.item.id);
                 return this.renderer.render(ImageGenerationReporter.started(event.item));
             case "collabAgentToolCall":
+                this.recordCollaborationChildren(event.item);
                 return this.renderer.render(this.subagents.legacyCollaborationStarted(event.item));
             case "agentMessage":
                 this.rememberAgentMessagePhase(event.item);
@@ -922,7 +940,7 @@ export class CodexEventHandler {
                     )
                     : this.renderer.render(CompactionReporter.started(event.item));
             case "subAgentActivity":
-                this.recordSubagentThread(event.item.agentThreadId, event.item.id);
+                this.recordSubagentThread(event.item.agentThreadId, event.item.kind, event.item.id);
                 return this.renderer.render(this.subagents.legacyActivityStarted(event.item));
             case "sleep":
             case "functionCallOutput":
@@ -963,6 +981,7 @@ export class CodexEventHandler {
             case "webSearch":
                 return this.renderer.render(WebSearchReporter.completed(event.item));
             case "collabAgentToolCall":
+                this.recordCollaborationChildren(event.item);
                 return this.renderer.render(this.subagents.legacyCollaborationCompleted(event.item));
             case "agentMessage":
                 this.rememberAgentMessagePhase(event.item);
@@ -979,7 +998,7 @@ export class CodexEventHandler {
                     )
                     : this.renderer.render(CompactionReporter.completed(event.item));
             case "subAgentActivity":
-                this.recordSubagentThread(event.item.agentThreadId, event.item.id);
+                this.recordSubagentThread(event.item.agentThreadId, event.item.kind, event.item.id);
                 return this.renderer.render(this.subagents.legacyActivityCompleted(event.item));
             //ignored types
             case "sleep":
@@ -1367,7 +1386,7 @@ export class CodexEventHandler {
     }
 
     private createSubagentStatsUpdate(threadId: string, tokenCount: TokenCount): UpdateSessionEvent | null {
-        const itemId = this.subagentActivityItemByThreadId.get(threadId);
+        const itemId = this.subagentCardFor(threadId);
         if (itemId == null) {
             return null;
         }
@@ -1385,8 +1404,110 @@ export class CodexEventHandler {
         };
     }
 
-    private recordSubagentThread(threadId: string, itemId: string): void {
-        this.subagentActivityItemByThreadId.set(threadId, itemId);
+    /*
+     * Fork addition: the work of a sub-agent thread, forwarded on the root session for a client
+     * that reads the sub-agent trail without native subagent sessions. Every update is attributed
+     * to the card of the sub-agent activity (`_meta.codex.parentToolCallId`), so the client nests
+     * it under that card. No `disposed` gate: a sub-agent outlives the prompt that started it, and
+     * its card settles when the app-server reports the end, exactly as the root thread does.
+     */
+    async handleChildTranscript(notification: ServerNotification): Promise<void> {
+        if (!isChildTranscriptNotification(notification)) return;
+        const threadId = (notification.params as {threadId?: unknown}).threadId;
+        if (typeof threadId !== "string" || threadId === this.sessionState.sessionId) return;
+        if (!this.sessionState.subagentParentItemByThreadId.has(threadId)) {
+            this.bufferChildTranscript(threadId, notification);
+            return;
+        }
+        await this.forwardChildTranscript(threadId, notification);
+    }
+
+    private bufferChildTranscript(threadId: string, notification: ServerNotification): void {
+        let buffer = this.pendingChildTranscript.get(threadId);
+        if (buffer === undefined) {
+            if (this.pendingChildTranscript.size >= CodexEventHandler.MAX_PENDING_SUBAGENT_THREADS) {
+                const oldest = this.pendingChildTranscript.keys().next().value;
+                if (oldest !== undefined) {
+                    this.pendingChildTranscript.delete(oldest);
+                    logger.log(`Dropping the buffered sub-agent transcript of ${oldest}: too many sub-agents`);
+                }
+            }
+            buffer = new PendingNotificationBuffer(threadId);
+            this.pendingChildTranscript.set(threadId, buffer);
+        }
+        buffer.push(notification);
+    }
+
+    private async forwardChildTranscript(threadId: string, notification: ServerNotification): Promise<void> {
+        const parentToolCallId = this.sessionState.subagentParentItemByThreadId.get(threadId);
+        if (parentToolCallId === undefined) return;
+        if (notification.method === "item/started") {
+            // The observation of the tool call id of a sub-agent: the client merges two cards
+            // with the same id, so a collision with the root thread would show up here.
+            const itemId = (notification.params as {item?: {id?: unknown}}).item?.id;
+            logger.log("Sub-agent transcript item", {sessionId: this.sessionState.sessionId, threadId, itemId});
+        }
+        const update = await this.createUpdateEvent(notification);
+        if (update === null) return;
+        await this.session.update(stampChildParentToolCallId(update, parentToolCallId));
+    }
+
+    /** Sends the buffered child updates whose sub-agent card is known now, in arrival order. */
+    private async flushPendingChildTranscript(): Promise<void> {
+        if (this.pendingChildTranscript.size === 0) return;
+        for (const [threadId, buffer] of [...this.pendingChildTranscript]) {
+            if (!this.sessionState.subagentParentItemByThreadId.has(threadId)) continue;
+            this.pendingChildTranscript.delete(threadId);
+            for (const notification of buffer.take()) {
+                await this.forwardChildTranscript(threadId, notification);
+            }
+        }
+    }
+
+    /*
+     * Fork addition: the card of a sub-agent thread. A `started` activity re-points the
+     * thread (Codex resumed the sub-agent), and the first activity that names the thread
+     * wins otherwise, so the token stats and the child trail stay on one card. A client that
+     * does not read the trail keeps the rule it had: the newest activity names the card.
+     */
+    private recordSubagentThread(threadId: string, kind: string, itemId: string): void {
+        const parents = this.subagentParents();
+        if (kind === "started"
+            || !parents.has(threadId)
+            || !this.sessionState.clientCapabilities.subagentTranscript) {
+            parents.set(threadId, itemId);
+        }
+    }
+
+    /*
+     * Fork addition: a client that reads the trail keeps the card of a sub-agent thread for the
+     * whole session, so a sub-agent that a later prompt continues stays attributed to the card
+     * that started it. Every other client keeps the per-prompt bookkeeping it had, and with it
+     * the same `_universe/subagentStats` updates it emitted before.
+     */
+    private subagentParents(): Map<string, string> {
+        return this.sessionState.clientCapabilities.subagentTranscript
+            ? this.sessionState.subagentParentItemByThreadId
+            : this.subagentCardOfPrompt;
+    }
+
+    private subagentCardFor(threadId: string): string | undefined {
+        return this.subagentParents().get(threadId);
+    }
+
+    /*
+     * Fork addition: a collaboration spawn names the threads it created, so the work of those
+     * threads can be attributed to the spawn card. Only for a client that reads the trail: every
+     * other client keeps the representation it had. A `started` activity of the same thread still
+     * wins (`recordSubagentThread`), because it is the card the app-server reports the trail on.
+     */
+    private recordCollaborationChildren(item: ThreadItem & {type: "collabAgentToolCall"}): void {
+        if (!this.sessionState.clientCapabilities.subagentTranscript || item.tool !== "spawnAgent") {
+            return;
+        }
+        for (const threadId of item.receiverThreadIds) {
+            if (threadId.trim() !== "") this.recordSubagentThread(threadId, "spawned", item.id);
+        }
     }
 
     private handleRateLimitsUpdated(params: AccountRateLimitsUpdatedNotification): void {
